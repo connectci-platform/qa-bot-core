@@ -6,7 +6,7 @@
   # Output directory (Create React App default)
   publish = "build"
   # Node version
-  environment = { NODE_VERSION = "18" }
+  environment = { NODE_VERSION = "24" }
 
 # SPA redirect - handle client-side routing
 [[redirects]]

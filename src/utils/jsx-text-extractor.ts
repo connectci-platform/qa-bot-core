@@ -42,3 +42,23 @@ export function extractTextFromJsx(element: unknown): string {
   // Unknown type - return empty string
   return '';
 }
+
+/**
+ * True when the element, or anything inside it, carries `data-transient`.
+ * Transient messages, such as a sign-in prompt whose button would be lost,
+ * are kept out of saved history. The check walks children because
+ * react-chatbotify may wrap a message before firing events.
+ */
+export function isTransientMessage(element: unknown): boolean {
+  if (!element || typeof element !== 'object') {
+    return false;
+  }
+  if (Array.isArray(element)) {
+    return element.some(isTransientMessage);
+  }
+  const props = (element as { props?: Record<string, unknown> }).props;
+  if (!props) {
+    return false;
+  }
+  return props['data-transient'] === true || isTransientMessage(props.children);
+}

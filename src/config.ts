@@ -79,6 +79,21 @@ export interface QABotAnalyticsEvent {
   linkText?: string;
 }
 
+/**
+ * Where a program's bot gets agent tokens, and where it may send them.
+ * Supplied by the program's wrapper, never by an embedding page.
+ */
+export interface AgentAuthConfig {
+  /** POST here mints an agent token with the browser's session cookie. */
+  tokenUrl: string;
+  /** Opened in the sign-in popup. */
+  loginUrl: string;
+  /** The agent's origin. The token is only ever sent to this origin. */
+  agentUrl: string;
+  /** Shown when a tool needs sign-in. Default: "Sign in to continue." */
+  signInText?: string;
+}
+
 export interface QABotProps {
   apiKey: string;
   qaEndpoint: string;
@@ -127,6 +142,14 @@ export interface QABotProps {
   isLoggedIn: boolean;
 
   /**
+   * Agent mode: authenticate to the agent with a Bearer token from the
+   * program's identity site instead of cookies. Off when unset. When set,
+   * `isLoggedIn` and `loginUrl` are ignored and sign-in state comes from the
+   * token. Set by the program's wrapper, not by embedding pages.
+   */
+  agentAuth?: AgentAuthConfig;
+
+  /**
    * Allow anonymous access to Q&A even when not logged in.
    * - Default: false (Q&A is gated when isLoggedIn is false)
    * - Set to true to bypass login gating for Q&A
@@ -136,8 +159,7 @@ export interface QABotProps {
 
   /**
    * The acting user's identifier (e.g., email or username).
-   * - Sent to the backend in both headers (X-Acting-User) and body (acting_user)
-   * - Optional: if not provided, requests will be anonymous
+   * Not sent anywhere; kept so existing callers still type-check.
    */
   actingUser?: string;
 

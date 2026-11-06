@@ -60,4 +60,45 @@ describe('SessionMessageTracker', () => {
       'You request an allocation through the ACCESS allocations portal...'
     );
   });
+
+  it('skips a message marked transient', () => {
+    renderTracker();
+
+    dispatchEvent('rcb-pre-inject-message', {
+      id: 't1',
+      content: <div data-transient>Sign in to continue.</div>,
+      sender: 'BOT',
+      type: 'object',
+    });
+
+    expect(getSessionMessages(SESSION_ID)).toEqual([]);
+  });
+
+  it('still stores a component message that is not transient', () => {
+    renderTracker();
+
+    dispatchEvent('rcb-pre-inject-message', {
+      id: 'c1',
+      content: <div>A saved component answer</div>,
+      sender: 'BOT',
+      type: 'object',
+    });
+
+    expect(getSessionMessages(SESSION_ID).map((m) => m.content)).toContain('A saved component answer');
+  });
+});
+
+describe('transient messages inside a wrapper', () => {
+  it('skips a transient element that react-chatbotify wrapped', () => {
+    renderTracker();
+
+    dispatchEvent('rcb-pre-inject-message', {
+      id: 't2',
+      content: <div className="rcb-bot-message"><span data-transient>Changes aren't available here.</span></div>,
+      sender: 'BOT',
+      type: 'object',
+    });
+
+    expect(getSessionMessages(SESSION_ID)).toEqual([]);
+  });
 });

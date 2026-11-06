@@ -6,6 +6,7 @@
   "module": "./dist/qa-bot-core.js",
   "exports": {
     ".": {
+      "types": "./dist/types/lib.d.ts",
       "import": "./dist/qa-bot-core.js",
       "require": "./dist/qa-bot-core.umd.cjs"
     },
@@ -14,7 +15,7 @@
     "./dist/qa-bot-core.css": "./dist/qa-bot-core.css"
   },
   "unpkg": "./dist/qa-bot-core.standalone.js",
-  "types": "./dist/types/index.d.ts",
+  "types": "./dist/types/lib.d.ts",
   "files": [
     "dist",
     "build"

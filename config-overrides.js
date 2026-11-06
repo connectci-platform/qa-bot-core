@@ -3,7 +3,7 @@
  */
 const { override, adjustStyleLoaders } = require("customize-cra");
 
-module.exports = override((config) => {
+const webpack = override((config) => {
   if (config.output) {
     config.output.filename = "static/js/[name].js";
     config.output.chunkFilename = "static/js/[name].chunk.js";
@@ -36,3 +36,17 @@ adjustStyleLoaders((rule) => {
     }
   }
 }));
+
+module.exports = {
+  webpack,
+  jest: (config) => ({
+    ...config,
+    moduleNameMapper: {
+      ...config.moduleNameMapper,
+      // vite-env.ts reads `import.meta`, which jest can't parse.
+      "(.*)/vite-env$": "<rootDir>/src/test-utils/vite-env.stub.ts",
+      // ESM-only packages that jest would otherwise have to transform.
+      "^(react-markdown|remark-gfm)$": "<rootDir>/src/test-utils/react-markdown.stub.tsx",
+    },
+  }),
+};

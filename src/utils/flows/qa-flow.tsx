@@ -5,7 +5,35 @@ import { getProcessedText } from '../getProcessedText';
 import LoginButton from '../../components/LoginButton';
 import TurnstileWidget from '../../components/TurnstileWidget';
 import { logger, isDebugEnabled } from '../logger';
+import { viteEnv } from '../vite-env';
+import { agentFetch, isAgentRequest } from '../agent-fetch';
+import { AgentTokenError } from '../agent-token';
+import type { AgentTokenSource, AuthStatus } from '../agent-token';
+import type { AgentAuthConfig } from '../../config';
 import type { AnalyticsEventInput } from '../../contexts/AnalyticsContext';
+
+/**
+ * What the flow needs in agent mode. QABot owns the token source and the
+ * reset; the flow only reads through this.
+ */
+export interface AgentFlowContext {
+  config: AgentAuthConfig;
+  source: AgentTokenSource;
+  /** The sign-in status, running the first mint if it is still unknown. */
+  ensureStatus(): Promise<AuthStatus>;
+  /** Start a new conversation: the user signed out, or the agent no longer knows this thread. */
+  requestReset(kind: 'signed_out' | 'thread_lost'): void;
+  /** The sign-in button for prompts. */
+  signInButton(): React.ReactElement;
+  /** False after the host called setBotEnabled(false). */
+  hostEnabled(): boolean;
+  /** Goes up on every reset, so a send can tell its conversation is gone. */
+  resetGeneration(): number;
+}
+
+const STILL_ANSWERING = 'Still answering your last question.';
+const AGENT_UNAVAILABLE = 'The assistant is temporarily unavailable. Please try again in a few minutes.';
+const DEFAULT_SIGN_IN_TEXT = 'Sign in to continue.';
 
 /**
  * Configuration for creating a Q&A flow
@@ -51,6 +79,8 @@ export interface CreateQAFlowParams {
   backendId?: string;
   /** RP slug for resource-scoped queries (e.g. 'delta'). */
   resourceContext?: string;
+  /** Agent mode: Bearer tokens instead of cookies. Unset keeps today's behavior. */
+  agent?: AgentFlowContext;
 }
 
 /**
@@ -98,16 +128,22 @@ interface TurnstileState {
   token: string | null;
   pendingQuery: any;
   needsChallenge: boolean;
+  /** Counts challenges, so a repeat challenge with the same site key is still new. */
+  challenge: number;
 }
+
+type ResubmitResult = 'success' | 'needs_another_challenge' | 'error' | 'busy';
 
 interface TurnstileWidgetWrapperProps {
   getState: () => TurnstileState;
-  onResubmit: (token: string) => Promise<'success' | 'needs_another_challenge' | 'error'>;
+  onResubmit: (token: string) => Promise<ResubmitResult>;
   trackEvent?: (event: AnalyticsEventInput) => void;
   loginUrl: string;
+  /** Re-render when the flow changes the challenge state outside the widget. */
+  subscribe?: (listener: () => void) => () => void;
 }
 
-function TurnstileWidgetWrapper({ getState, onResubmit, trackEvent, loginUrl }: TurnstileWidgetWrapperProps) {
+function TurnstileWidgetWrapper({ getState, onResubmit, trackEvent, loginUrl, subscribe }: TurnstileWidgetWrapperProps) {
   // Track which siteKey we've already resolved against. When a NEW challenge
   // is requested (siteKey changes), we want the widget to reappear — we
   // can't use a plain `resolved` boolean because it would permanently
@@ -115,21 +151,25 @@ function TurnstileWidgetWrapper({ getState, onResubmit, trackEvent, loginUrl }: 
   const [resolvedFor, setResolvedFor] = React.useState<string | null>(null);
   // Incremented to force re-mount of TurnstileWidget when a re-challenge is needed
   const [challengeKey, setChallengeKey] = React.useState(0);
+  const [, rerender] = React.useReducer((n: number) => n + 1, 0);
+  React.useEffect(() => subscribe?.(rerender), [subscribe]);
   const state = getState();
 
   // Dev-only force-render for widget styling work: VITE_FORCE_TURNSTILE_WIDGET=true
   // keeps the modal mounted regardless of proxy state. Defaults off. See README.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const env = (import.meta as any).env ?? {};
+  const env = viteEnv();
   const forceRender = env.VITE_FORCE_TURNSTILE_WIDGET === 'true';
   const effectiveSiteKey = state.siteKey ?? (forceRender ? env.VITE_TURNSTILE_SITE_KEY : null);
 
   if (!effectiveSiteKey) return null;
-  if (!forceRender && resolvedFor === effectiveSiteKey) return null;
+  // Agent mode (the only caller that subscribes) tells repeat challenges
+  // apart by count, since the site key doesn't change between them.
+  const challengeId = subscribe ? `${effectiveSiteKey}#${state.challenge}` : effectiveSiteKey;
+  if (!forceRender && resolvedFor === challengeId) return null;
 
   return (
     <TurnstileWidget
-      key={challengeKey}
+      key={subscribe ? `${challengeKey}-${state.challenge}` : challengeKey}
       siteKey={effectiveSiteKey}
       loginUrl={loginUrl}
       onVerify={async (token) => {
@@ -137,10 +177,15 @@ function TurnstileWidgetWrapper({ getState, onResubmit, trackEvent, loginUrl }: 
         // state.siteKey on success, so reading it afterward gives null, and
         // setResolvedFor(null) is a no-op when resolvedFor is already null —
         // the modal would never unmount on a first successful challenge.
-        const challengeSiteKey = effectiveSiteKey;
+        const challengeSiteKey = challengeId;
         state.token = token;
         trackEvent?.({ type: 'chatbot_turnstile_completed' });
         const result = await onResubmit(token);
+        if (result === 'busy') {
+          // A sign-in is already sending the question; its outcome decides
+          // whether this widget is needed again.
+          return;
+        }
         if (result === 'needs_another_challenge') {
           // Proxy asked for another challenge — re-mount widget with new siteKey
           setChallengeKey(k => k + 1);
@@ -157,7 +202,7 @@ function TurnstileWidgetWrapper({ getState, onResubmit, trackEvent, loginUrl }: 
         // the chat returns to a clean idle, then mark the challenge resolved.
         // Capture queryId before clearing pendingQuery.
         const queryId = state.pendingQuery?.queryId;
-        const challengeSiteKey = effectiveSiteKey;
+        const challengeSiteKey = challengeId;
         state.token = null;
         state.pendingQuery = null;
         state.needsChallenge = false;
@@ -194,9 +239,11 @@ export const createQAFlow = ({
   resetTurnstileToken,
   backendId,
   resourceContext,
+  agent,
 }: CreateQAFlowParams) => {
-  // Gate Q&A when user is logged out (unless allowAnonAccess is true)
-  if (isLoggedIn === false && !allowAnonAccess) {
+  // Gate Q&A when user is logged out (unless allowAnonAccess is true).
+  // Agent mode gates on each send instead, so signing in never swaps flows.
+  if (!agent && isLoggedIn === false && !allowAnonAccess) {
     // Track that login prompt was shown
     trackEvent?.({ type: 'chatbot_login_prompt_shown' });
 
@@ -224,19 +271,149 @@ export const createQAFlow = ({
     token: null as string | null,
     pendingQuery: null as { query: string; sessionId: string | null; queryId: string } | null,
     needsChallenge: false,
+    challenge: 0,
   };
 
   // Mutable ref to injectMessage — captured from chatState on each message call
   // so the Turnstile onVerify callback can inject responses into the chat.
-  let injectMessage: ((msg: string) => Promise<void>) | null = null;
+  let injectMessage: ((msg: string | React.ReactElement) => Promise<unknown>) | null = null;
+
+  // Agent requests carry the token; everything else is today's fetch.
+  const request = (url: string, init: RequestInit) =>
+    agent ? agentFetch(agent.source, agent.config, url, init) : fetch(url, init);
+
+  // Tells the Turnstile widget to re-read state the flow changed itself.
+  const turnstileListeners = new Set<() => void>();
+  const subscribeTurnstile = (listener: () => void) => {
+    turnstileListeners.add(listener);
+    return () => {
+      turnstileListeners.delete(listener);
+    };
+  };
+  const notifyTurnstile = () => {
+    if (agent) turnstileListeners.forEach((listener) => listener());
+  };
+
+  // A prompt that is never saved to history, since its button can't be restored.
+  // react-chatbotify only draws the bubble for string messages, so a
+  // component message draws its own, matching the bot's (rcb-bot-message
+  // plus the colors react-chatbotify sets inline on string messages).
+  const transient = (text: string, withSignIn: boolean) => (
+    <div data-transient className="rcb-bot-message-container">
+      <div>
+        <div
+          className="rcb-bot-message"
+          style={{ backgroundColor: 'var(--secondaryColor, #107180)', color: '#fff', maxWidth: '70%' }}
+        >
+          {text}
+        </div>
+        {withSignIn && agent?.signInButton()}
+      </div>
+    </div>
+  );
+
+  // The agent's call-time gate refused a tool. write_scope means this page
+  // can't make changes even signed in, so it gets no sign-in button.
+  const refusalMessage = (reason: string) =>
+    reason === 'write_scope'
+      ? transient("Changes aren't available here.", false)
+      : transient(agent?.config.signInText || DEFAULT_SIGN_IN_TEXT, true);
+
+  // Agent statuses that answer before any run starts. Returns the reply, or
+  // null when the response should be read as usual. Only the agent's own
+  // responses count: a proxy or a wrong path can 404 too.
+  const agentStatusReply = async (url: string, res: Response): Promise<string | undefined | null> => {
+    if (!agent || res.ok || !isAgentRequest(agent.config, url)) return null;
+    if (res.status === 404) {
+      // The agent's answer when the thread belongs to another identity.
+      const body = await res.json().catch(() => null);
+      if (body?.detail !== 'Thread not found') return null;
+      agent.requestReset('thread_lost');
+      return undefined;
+    }
+    if (res.status === 409) return STILL_ANSWERING;
+    if (res.status === 503) return AGENT_UNAVAILABLE;
+    return null;
+  };
+
+  // The one sign-in watch for a pending Turnstile challenge. Each new
+  // challenge replaces it, so a sign-in resends at most once.
+  let signInWatch: (() => void) | null = null;
+  const dropSignInWatch = () => {
+    signInWatch?.();
+    signInWatch = null;
+  };
+  const clearTurnstile = () => {
+    turnstileState.token = null;
+    turnstileState.pendingQuery = null;
+    turnstileState.needsChallenge = false;
+    turnstileState.siteKey = null;
+    notifyTurnstile();
+  };
+  const watchForSignIn = () => {
+    if (!agent) return;
+    dropSignInWatch();
+    signInWatch = agent.source.subscribe(() => {
+      if (agent.source.getStatus() !== 'signed_in') return;
+      dropSignInWatch();
+      if (!turnstileState.needsChallenge || !turnstileState.pendingQuery) return;
+      if (turnstileState.pendingQuery.sessionId !== getSessionId()) {
+        // The conversation was reset; its question belongs to no one now.
+        clearTurnstile();
+        return;
+      }
+      void handleTurnstileResubmit(null);
+    });
+  };
+
+  // One resubmit at a time: the widget and a sign-in can both try to send
+  // the pending question.
+  let resubmitting = false;
 
   // Auto-resubmit after visible Turnstile challenge completes.
   // Called from TurnstileWidgetWrapper's onVerify — fetches the pending query
   // with the new token and injects the response directly into the chat.
   // Returns: 'success' | 'needs_another_challenge' | 'error'
-  const handleTurnstileResubmit = async (token: string): Promise<'success' | 'needs_another_challenge' | 'error'> => {
+  // A null token means the user signed in while challenged: the agent skips
+  // Turnstile for signed-in callers, so the question goes without one.
+  const handleTurnstileResubmit = async (token: string | null): Promise<ResubmitResult> => {
+    if (agent && resubmitting) return 'busy';
+    resubmitting = true;
+    let result: ResubmitResult;
+    try {
+      result = await resubmitPending(token);
+    } finally {
+      resubmitting = false;
+    }
+    if (agent && result === 'needs_another_challenge') {
+      // A widget resend that went out before the user signed in: send again
+      // with the token, which the agent doesn't challenge.
+      if (token !== null && agent.source.getStatus() === 'signed_in') {
+        return handleTurnstileResubmit(null);
+      }
+      watchForSignIn();
+    } else if (result !== 'needs_another_challenge') {
+      dropSignInWatch();
+    }
+    return result;
+  };
+
+  const resubmitPending = async (token: string | null): Promise<'success' | 'needs_another_challenge' | 'error'> => {
     if (!turnstileState.pendingQuery || !injectMessage) {
       logger.error('Turnstile resubmit called without pending query or injectMessage');
+      return 'error';
+    }
+
+    // In agent mode a reset can start a new conversation while this runs;
+    // its question and answer belong to the old one.
+    const forSession = turnstileState.pendingQuery.sessionId;
+    const stale = () => agent !== undefined && forSession !== getSessionId();
+    const inject = injectMessage;
+    const show = async (message: string | React.ReactElement) => {
+      if (!stale()) await inject(message);
+    };
+    if (stale()) {
+      clearTurnstile();
       return 'error';
     }
 
@@ -252,8 +429,10 @@ export const createQAFlow = ({
       const retryBody: Record<string, string> = {
         query: turnstileState.pendingQuery.query,
         question_id: turnstileState.pendingQuery.queryId,
-        turnstile_token: token,
       };
+      if (token !== null) {
+        retryBody.turnstile_token = token;
+      }
       if (turnstileState.pendingQuery.sessionId) {
         retryBody.session_id = turnstileState.pendingQuery.sessionId;
       }
@@ -269,7 +448,7 @@ export const createQAFlow = ({
         retryBody.resource_context = resourceContext;
       }
 
-      const retryResponse = await fetch(endpoint, {
+      const retryResponse = await request(endpoint, {
         method: 'POST',
         headers,
         credentials: 'include',
@@ -277,6 +456,13 @@ export const createQAFlow = ({
       });
 
       const savedQueryId = turnstileState.pendingQuery.queryId;
+
+      const statusReply = await agentStatusReply(endpoint, retryResponse);
+      if (statusReply !== null) {
+        clearTurnstile();
+        if (statusReply) await show(statusReply);
+        return 'error';
+      }
 
       if (!retryResponse.ok) {
         throw new Error(`API returned ${retryResponse.status} after Turnstile`);
@@ -293,6 +479,7 @@ export const createQAFlow = ({
         let sseBuffer = '';
         let collectedTokens = '';
         let doneMetadata: Record<string, unknown> = {};
+        let refusal: string | null = null;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -315,6 +502,7 @@ export const createQAFlow = ({
                 const parsed = JSON.parse(evData);
                 if (evType === 'token') collectedTokens += (parsed.content || '');
                 else if (evType === 'done') doneMetadata = (parsed.metadata as Record<string, unknown>) || {};
+                else if (evType === 'requires_auth' && agent) refusal = (parsed.reason as string) || null;
               } catch { /* skip malformed */ }
             }
             boundary = sseBuffer.indexOf('\n\n');
@@ -327,14 +515,15 @@ export const createQAFlow = ({
         turnstileState.needsChallenge = false;
         turnstileState.siteKey = null;
 
-        if (!collectedTokens) throw new Error('No content received from stream');
+        if (!collectedTokens && !refusal) throw new Error('No content received from stream');
 
         lastRatingTarget = (doneMetadata.rating_target as string) || null;
         lastIsFinalResponse = doneMetadata.is_final_response === true;
         feedbackQueryId = savedQueryId;
 
-        const processedText = getProcessedText(collectedTokens);
-        await injectMessage(processedText);
+        if (collectedTokens) await show(getProcessedText(collectedTokens));
+        notifyTurnstile();
+        if (refusal) await show(refusalMessage(refusal));
 
         trackEvent?.({
           type: 'chatbot_answer_received',
@@ -352,7 +541,9 @@ export const createQAFlow = ({
       if (body.requires_turnstile) {
         turnstileState.siteKey = body.site_key;
         turnstileState.token = null;
-        await injectMessage("Still verifying — please complete the challenge again.");
+        turnstileState.challenge += 1;
+        notifyTurnstile();
+        await show("Still verifying — please complete the challenge again.");
         return 'needs_another_challenge';
       }
 
@@ -374,7 +565,8 @@ export const createQAFlow = ({
       const metadataText = isDebugEnabled() ? buildMetadataText(body) : '';
       const fullContent = metadataText ? `${processedText}\n\n${metadataText}` : processedText;
 
-      await injectMessage(fullContent);
+      await show(fullContent);
+      notifyTurnstile();
 
       trackEvent?.({
         type: 'chatbot_answer_received',
@@ -389,7 +581,7 @@ export const createQAFlow = ({
       turnstileState.pendingQuery = null;
       turnstileState.needsChallenge = false;
       turnstileState.siteKey = null;
-      await injectMessage?.("I had trouble processing your question after verification. Please try again.");
+      await show("I had trouble processing your question after verification. Please try again.");
       return 'error';
     }
   };
@@ -452,7 +644,7 @@ export const createQAFlow = ({
                       rating: isPositive ? 1 : 0,
                     };
 
-                await fetch(targetEndpoint, {
+                await request(targetEndpoint, {
                   method: 'POST',
                   headers,
                   credentials: 'include',
@@ -474,7 +666,34 @@ export const createQAFlow = ({
         }
 
         // Process as a question
+        // A reset during this send means its conversation is gone; stop
+        // writing into the new one.
+        const generation = agent?.resetGeneration();
+        const abandoned = () => agent !== undefined && agent.resetGeneration() !== generation;
         try {
+          if (agent) {
+            if (!agent.hostEnabled()) {
+              return 'To ask questions, please log in first.';
+            }
+            // Wait for the first mint, so a send never goes out before the
+            // bot knows whether the user is signed in.
+            const status = await agent.ensureStatus();
+            if (!allowAnonAccess && status === 'signed_out') {
+              trackEvent?.({ type: 'chatbot_login_prompt_shown' });
+              await chatState.injectMessage(transient('To ask questions, please sign in first.', true));
+              return;
+            }
+            if (!allowAnonAccess && status !== 'signed_in') {
+              return new AgentTokenError(agent.source.lastFailure() ?? 'temporary').message;
+            }
+            if (status === 'signed_in' && !(await agent.source.getToken())) {
+              // Signed out elsewhere: the agent would refuse this thread to
+              // an anonymous caller, so start over instead of sending.
+              agent.requestReset('signed_out');
+              return;
+            }
+          }
+
           const queryId = uuidv4();
           feedbackQueryId = queryId;
 
@@ -532,12 +751,23 @@ export const createQAFlow = ({
           // Capture timestamp before fetch for response time calculation
           const requestStartTime = Date.now();
 
-          const response = await fetch(endpoint, {
+          if (abandoned()) {
+            // A reset (say, a sign-out seen while minting) already started a
+            // new conversation; this question belonged to the old one.
+            return;
+          }
+
+          const response = await request(endpoint, {
             method: 'POST',
             headers,
             credentials: 'include',
             body: JSON.stringify(requestBody)
           });
+
+          const statusReply = await agentStatusReply(endpoint, response);
+          if (statusReply !== null) {
+            return statusReply;
+          }
 
           if (!response.ok) {
             throw new Error(`API returned ${response.status}`);
@@ -556,9 +786,10 @@ export const createQAFlow = ({
             let buffer = '';
             let tokenContent = '';  // Accumulated LLM tokens
             let streamStarted = false;
+            let refusal: string | null = null;
 
             try {
-              while (true) {
+              while (!abandoned()) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
@@ -566,7 +797,7 @@ export const createQAFlow = ({
 
                 // Parse SSE events from buffer (events are separated by double newlines)
                 let boundary = buffer.indexOf('\n\n');
-                while (boundary !== -1) {
+                while (boundary !== -1 && !abandoned()) {
                   const eventBlock = buffer.slice(0, boundary);
                   buffer = buffer.slice(boundary + 2);
 
@@ -629,6 +860,9 @@ export const createQAFlow = ({
                         await chatState.endStreamMessage('BOT');
                       }
                     }
+                  } else if (eventType === 'requires_auth' && agent) {
+                    // Sent just before done; explained once the reply is shown.
+                    refusal = (parsed.reason as string) || null;
                   } else if (eventType === 'error') {
                     const errorMsg = (parsed.message as string) || 'An error occurred';
                     logger.error('SSE error event:', errorMsg);
@@ -645,7 +879,7 @@ export const createQAFlow = ({
               }
 
               // If stream ended without a done event, finalize anyway
-              if (streamStarted) {
+              if (streamStarted && !abandoned()) {
                 // endStreamMessage is idempotent if already called
                 await chatState.endStreamMessage('BOT');
               }
@@ -657,6 +891,15 @@ export const createQAFlow = ({
               } else {
                 throw streamError;
               }
+            }
+
+            if (abandoned()) {
+              reader.cancel().catch(() => {});
+              return;
+            }
+
+            if (refusal) {
+              await chatState.injectMessage(refusalMessage(refusal));
             }
 
             const responseTimeMs = Date.now() - requestStartTime;
@@ -679,8 +922,12 @@ export const createQAFlow = ({
           if (body.requires_turnstile) {
             trackEvent?.({ type: 'chatbot_turnstile_shown', queryId });
             turnstileState.siteKey = body.site_key;
+            turnstileState.challenge += 1;
             turnstileState.pendingQuery = { query: userInput, sessionId: currentSessionId, queryId };
             turnstileState.needsChallenge = true;
+            // Signing in makes the challenge moot: the question goes with
+            // the token instead.
+            watchForSignIn();
             return "One moment — verifying your session…";
           }
 
@@ -721,6 +968,10 @@ export const createQAFlow = ({
 
           return;
         } catch (error) {
+          if (error instanceof AgentTokenError) {
+            // The mint failed for a user who needs a token; nothing was sent.
+            return error.message;
+          }
           logger.error('Error in Q&A flow:', error);
 
           // Track error event
@@ -774,6 +1025,7 @@ export const createQAFlow = ({
         <TurnstileWidgetWrapper
           getState={() => turnstileState}
           onResubmit={handleTurnstileResubmit}
+          subscribe={agent ? subscribeTurnstile : undefined}
           trackEvent={trackEvent}
           loginUrl={loginUrl}
         />

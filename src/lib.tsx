@@ -34,8 +34,17 @@ export type { FlowSettingsOptions } from './utils/flow-settings';
 // Export history tracking helpers for custom flows
 export { withHistory, withHistoryFn } from './utils/with-history';
 
+// Agent mode: for wrappers that make their own agent requests (such as
+// capabilities) with the same token and the same 401 handling as the bot.
+export { getAgentTokenSource } from './utils/agent-token';
+export type { AgentTokenSource, AuthStatus, AgentTokenErrorKind } from './utils/agent-token';
+export { AgentTokenError } from './utils/agent-token';
+export { agentFetch, isAgentRequest } from './utils/agent-fetch';
+export { useAgentAuthStatus } from './hooks/useAgentAuthStatus';
+
 // Export types for usage
 export type {
+  AgentAuthConfig,
   QABotProps,
   BotControllerHandle,
   QABotAnalyticsEvent,

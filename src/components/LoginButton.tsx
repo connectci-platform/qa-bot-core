@@ -18,18 +18,25 @@ interface LoginButtonProps {
   className?: string;
   style?: React.CSSProperties;
   isHeaderButton?: boolean;
+  /** Replaces following the link, e.g. to sign in through a popup. */
+  onClick?: () => void;
 }
 
 const LoginButton: React.FC<LoginButtonProps> = ({
   loginUrl,
   className = '',
   style,
-  isHeaderButton = false
+  isHeaderButton = false,
+  onClick
 }) => {
   const { trackEvent } = useAnalytics();
 
-  const handleClick = () => {
+  const handleClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
     trackEvent({ type: 'chatbot_login_clicked', loginUrl });
+    if (onClick) {
+      event.preventDefault();
+      onClick();
+    }
   };
   const headerStyle: React.CSSProperties = {
     display: 'inline-block',

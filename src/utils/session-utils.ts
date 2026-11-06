@@ -72,6 +72,15 @@ const saveSessionMessagesStore = (store: SessionMessagesStore): void => {
 };
 
 /**
+ * Remove every conversation from history. History is one key for everyone
+ * using this browser, so a sign-out clears it rather than leave the
+ * signed-out user's conversations for the next person.
+ */
+export const clearAllSessions = (): void => {
+  localStorage.removeItem(SESSION_MESSAGES_KEY);
+};
+
+/**
  * Add a message to a session's storage.
  * Called when RcbPreInjectMessageEvent fires.
  * Stores the full message so we can restore sessions without relying on RCB's history.

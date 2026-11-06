@@ -5,6 +5,7 @@ import { getProcessedText } from '../getProcessedText';
 import LoginButton from '../../components/LoginButton';
 import TurnstileWidget from '../../components/TurnstileWidget';
 import { logger, isDebugEnabled } from '../logger';
+import { viteEnv } from '../vite-env';
 import type { AnalyticsEventInput } from '../../contexts/AnalyticsContext';
 
 /**
@@ -119,8 +120,7 @@ function TurnstileWidgetWrapper({ getState, onResubmit, trackEvent, loginUrl }: 
 
   // Dev-only force-render for widget styling work: VITE_FORCE_TURNSTILE_WIDGET=true
   // keeps the modal mounted regardless of proxy state. Defaults off. See README.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const env = (import.meta as any).env ?? {};
+  const env = viteEnv();
   const forceRender = env.VITE_FORCE_TURNSTILE_WIDGET === 'true';
   const effectiveSiteKey = state.siteKey ?? (forceRender ? env.VITE_TURNSTILE_SITE_KEY : null);
 

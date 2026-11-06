@@ -11,9 +11,9 @@ The reason is our **primary CDN is jsDelivr serving files directly from the
 GitHub repo** at a version tag:
 
 ```
-https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v${version}/build/static/js/main.js
-https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v${version}/build/static/js/453.chunk.js
-https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v${version}/build/static/css/main.css
+https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v${version}/build/static/js/main.js
+https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v${version}/build/static/js/453.chunk.js
+https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v${version}/build/static/css/main.css
 ```
 
 Every site that embeds the bot via jsDelivr loads these exact committed files
@@ -53,8 +53,8 @@ In our project, version management is critical because of our CDN delivery syste
 
 Our CDN links follow this pattern:
 ```
-https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v${version}/build/static/js/main.js
-https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v${version}/build/static/js/453.chunk.js
+https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v${version}/build/static/js/main.js
+https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v${version}/build/static/js/453.chunk.js
 ```
 
 ✅ **Note**: Thanks to our `config-overrides.js` file, chunk filenames are consistent across builds. The `453.chunk.js` filename is stable and predictable.
@@ -164,7 +164,7 @@ git push origin v0.1.1
 ```
 
 #### GitHub Release Steps:
-- Go to: https://github.com/necyberteam/qa-bot-core/releases/new
+- Go to: https://github.com/connectci-platform/qa-bot-core/releases/new
 - Select the tag you just created (v0.1.1)
 - Add a title and description
 - Click "Publish release"
@@ -235,17 +235,17 @@ Our project uses two CDN systems:
 This CDN pulls directly from our GitHub repository based on git tags:
 
 ```
-https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v0.1.0/build/static/js/main.js
+https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v0.1.0/build/static/js/main.js
 ```
 
 The version number in these URLs must match git tags in our repository. Never reuse a version number that already has a tag to avoid breaking existing CDN links.
 
 A complete jsDelivr implementation typically requires three files:
 ```html
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v0.1.0/build/static/css/main.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v0.1.0/build/static/css/main.css">
 <div id="qa-bot"></div>
-<script src="https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v0.1.0/build/static/js/main.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/necyberteam/qa-bot-core@v0.1.0/build/static/js/453.chunk.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v0.1.0/build/static/js/main.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/connectci-platform/qa-bot-core@v0.1.0/build/static/js/453.chunk.js"></script>
 ```
 
 **Important:** When updating the package:

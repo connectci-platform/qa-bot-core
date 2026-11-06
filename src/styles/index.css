@@ -103,6 +103,18 @@
   border-color: transparent transparent transparent #1a5b6e;
 }
 
+.qa-bot-tooltip-hidden .rcb-chat-tooltip {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  transition: opacity 0.2s ease, visibility 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qa-bot-tooltip-hidden .rcb-chat-tooltip {
+    transition: none;
+  }
+}
+
 /* unused "ringing phone" effect for the tooltip */
 @keyframes phone-ring {
   0% {

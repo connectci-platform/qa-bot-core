@@ -2,6 +2,7 @@ import '@testing-library/jest-dom';
 import React from 'react';
 import { act, render, screen } from '@testing-library/react';
 import QABot from './QABot';
+import { TOOLTIP_DISMISSED_KEY } from '../hooks/useTooltipVisibility';
 import type { BotControllerHandle } from '../config';
 
 jest.mock('../config', () => require('../test-utils/config-without-stream').default());
@@ -33,6 +34,46 @@ let fetchMock: jest.Mock;
 beforeEach(() => {
   fetchMock = jest.fn();
   global.fetch = fetchMock;
+});
+
+describe('chat callout', () => {
+  const hiddenClass = () => document.querySelector('.qa-bot-tooltip-hidden');
+
+  beforeEach(() => {
+    window.sessionStorage.clear();
+    // jsdom has no layout, so every page would otherwise count as near the bottom.
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      value: 5000,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    delete (document.documentElement as { scrollHeight?: number }).scrollHeight;
+  });
+
+  it('shows on the floating bot until the chat has been opened', async () => {
+    renderBot({ embedded: false });
+    await settle();
+
+    expect(hiddenClass()).not.toBeInTheDocument();
+  });
+
+  it('hides on the floating bot once the chat has been opened this session', async () => {
+    window.sessionStorage.setItem(TOOLTIP_DISMISSED_KEY, 'true');
+    renderBot({ embedded: false });
+    await settle();
+
+    expect(hiddenClass()).toBeInTheDocument();
+  });
+
+  it('leaves the embedded bot alone', async () => {
+    window.sessionStorage.setItem(TOOLTIP_DISMISSED_KEY, 'true');
+    renderBot({ embedded: true });
+    await settle();
+
+    expect(hiddenClass()).not.toBeInTheDocument();
+  });
 });
 
 describe('sign-in state without agent auth', () => {

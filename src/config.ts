@@ -125,6 +125,10 @@ export interface QABotProps {
   footerText?: string;
   footerLink?: string;
   tooltipText?: string;
+  /** Stop showing the callout once the chat has been opened this session. Default: true. */
+  tooltipOncePerSession?: boolean;
+  /** Hide the callout within this many pixels of the page bottom. Default: 300. */
+  tooltipBottomOffset?: number;
   loginUrl?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -220,6 +224,8 @@ export const defaultValues: {
   errorMessage: string;
   embedded: boolean;
   tooltipText: string;
+  tooltipOncePerSession: boolean;
+  tooltipBottomOffset: number;
   loginUrl: string;
 } = {
   primaryColor: '#1a5b6e',
@@ -231,6 +237,8 @@ export const defaultValues: {
   errorMessage: 'Select an option to continue',
   embedded: false,
   tooltipText: 'Ask me a question!',
+  tooltipOncePerSession: true,
+  tooltipBottomOffset: 300,
   loginUrl: '/login'
 };
 

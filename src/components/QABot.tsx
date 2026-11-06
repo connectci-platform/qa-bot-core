@@ -17,6 +17,7 @@ import useChatBotSettings from '../hooks/useChatBotSettings';
 import useFocusableSendButton from '../hooks/useFocusableSendButton';
 import useKeyboardNavigation from '../hooks/useKeyboardNavigation';
 import useUpdateHeader from '../hooks/useUpdateHeader';
+import useTooltipVisibility from '../hooks/useTooltipVisibility';
 import { useAgentAuthStatus } from '../hooks/useAgentAuthStatus';
 import { useTurnstile } from '../hooks/useTurnstile';
 import { createQAFlow, type AgentFlowContext } from '../utils/flows/qa-flow';
@@ -88,6 +89,8 @@ const QABot = forwardRef<BotControllerHandle, QABotProps>((props, ref) => {
     footerText,
     footerLink,
     tooltipText,
+    tooltipOncePerSession,
+    tooltipBottomOffset,
 
     // Login props
     loginUrl,
@@ -328,6 +331,13 @@ const QABot = forwardRef<BotControllerHandle, QABotProps>((props, ref) => {
   // Update header based on login state
   useUpdateHeader(isAgentMode ? authStatus === 'signed_in' : internalIsLoggedIn !== false, containerRef);
 
+  const tooltipHidden = useTooltipVisibility({
+    containerRef,
+    embedded: isEmbeddedMode,
+    oncePerSession: tooltipOncePerSession ?? defaultValues.tooltipOncePerSession,
+    bottomOffset: tooltipBottomOffset ?? defaultValues.tooltipBottomOffset,
+  });
+
   // Apply theme colors as CSS variables and other settings
   // Note: Footer is configured in the settings useMemo above to avoid flashing
   useChatBotSettings({ settings, themeColors });
@@ -545,7 +555,7 @@ const QABot = forwardRef<BotControllerHandle, QABotProps>((props, ref) => {
 
   return (
     <div
-      className={`qa-bot ${settings.general?.embedded ? "embedded-qa-bot" : ""}`}
+      className={`qa-bot ${settings.general?.embedded ? "embedded-qa-bot" : ""} ${tooltipHidden ? "qa-bot-tooltip-hidden" : ""}`}
       ref={containerRef}
       role="region"
       aria-label={`${botName || defaultValues.botName}${settings.general?.embedded ? " - Embedded" : ""}`}

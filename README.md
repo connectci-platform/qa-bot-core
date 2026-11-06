@@ -271,7 +271,9 @@ How it behaves:
   make changes.
 - **Signing out starts a new conversation and clears saved history**, which is
   one store for everyone using the browser. A thread the agent no longer lets
-  this page continue also starts over.
+  this page continue also starts over. Signing out of the identity site
+  doesn't revoke the token already held, so the bot notices at its next token
+  fetch: up to the token's lifetime (15 minutes for ACCESS) later.
 - **One token source per identity site per bundle.** Bots in the same bundle
   share it; a separately bundled copy has its own.
 

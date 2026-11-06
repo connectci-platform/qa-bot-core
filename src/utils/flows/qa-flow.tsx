@@ -295,10 +295,20 @@ export const createQAFlow = ({
   };
 
   // A prompt that is never saved to history, since its button can't be restored.
+  // react-chatbotify only draws the bubble for string messages, so a
+  // component message draws its own, matching the bot's (rcb-bot-message
+  // plus the colors react-chatbotify sets inline on string messages).
   const transient = (text: string, withSignIn: boolean) => (
-    <div data-transient>
-      <p>{text}</p>
-      {withSignIn && agent?.signInButton()}
+    <div data-transient className="rcb-bot-message-container">
+      <div>
+        <div
+          className="rcb-bot-message"
+          style={{ backgroundColor: 'var(--secondaryColor, #107180)', color: '#fff', maxWidth: '70%' }}
+        >
+          {text}
+        </div>
+        {withSignIn && agent?.signInButton()}
+      </div>
     </div>
   );
 

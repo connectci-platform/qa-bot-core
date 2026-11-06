@@ -30,6 +30,9 @@ function ExampleApp() {
     ? { tokenUrl: `${supportUrl}/api/agent-token`, loginUrl: `${supportUrl}/user/login`, agentUrl }
     : null;
   const [agentMode, setAgentMode] = useState(false);
+  // Anonymous Q&A, on by default: the agent itself decides which tools need
+  // sign-in and challenges anonymous callers with Turnstile.
+  const [anonAccess, setAnonAccess] = useState(true);
   const agentAuth = agentMode && agentAuthConfig ? agentAuthConfig : undefined;
 
   // Environment variables are now used directly
@@ -131,6 +134,15 @@ function ExampleApp() {
               <span>{agentAuthConfig ? (agentMode ? 'Agent sign-in on' : 'Agent sign-in off') : 'Agent sign-in (set REACT_APP_AGENT_URL and REACT_APP_SUPPORT_URL)'}</span>
               <code className="demo-prop-name">agentAuth={agentMode ? '{…}' : 'undefined'}</code>
             </label>
+            <label className="demo-checkbox">
+              <input
+                type="checkbox"
+                checked={anonAccess}
+                onChange={(e) => setAnonAccess(e.target.checked)}
+              />
+              <span>{anonAccess ? 'Anonymous questions allowed' : 'Sign-in required to ask'}</span>
+              <code className="demo-prop-name">allowAnonAccess={anonAccess ? 'true' : 'false'}</code>
+            </label>
           </div>
 
           <div className="demo-section">
@@ -186,6 +198,7 @@ function ExampleApp() {
                 actingUser="demo-user@access-ci.org"
                 onAnalyticsEvent={handleAnalyticsEvent}
                 agentAuth={agentAuth}
+                allowAnonAccess={anonAccess}
               />
             </div>
           ) : (
@@ -220,6 +233,7 @@ function ExampleApp() {
           actingUser="demo-user@access-ci.org"
           onAnalyticsEvent={handleAnalyticsEvent}
           agentAuth={agentAuth}
+          allowAnonAccess={anonAccess}
         />
       )}
     </div>

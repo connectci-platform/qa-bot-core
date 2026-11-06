@@ -6,8 +6,8 @@ import type { BotControllerHandle } from '../config';
 
 jest.mock('../config', () => require('../test-utils/config-without-stream').default());
 
-const settle = () => act(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 50));
+const settle = (ms = 50) => act(async () => {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 });
 
 function renderBot(props: Partial<React.ComponentProps<typeof QABot>> = {}) {
@@ -78,5 +78,190 @@ describe('sign-in state without agent auth', () => {
     await settle();
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Agent mode ─────────────────────────────────────────────────────────
+
+let tokenUrlCount = 0;
+
+function agentConfig() {
+  // A fresh identity site per test: token sources are shared per URL.
+  tokenUrlCount += 1;
+  return {
+    tokenUrl: `https://support${tokenUrlCount}.example/api/agent-token`,
+    loginUrl: `https://support${tokenUrlCount}.example/user/login`,
+    agentUrl: 'https://agent.example',
+  };
+}
+
+const minted = (token: string) => ({
+  ok: true,
+  status: 200,
+  headers: new Headers(),
+  json: async () => ({ access_token: token, expires_in: 900 }),
+}) as unknown as Response;
+const loginRequired = () => ({ ok: false, status: 401, headers: new Headers(), json: async () => ({}) }) as unknown as Response;
+
+const mintCalls = () => fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/api/agent-token'));
+
+function renderAgentBot(props: Partial<React.ComponentProps<typeof QABot>> = {}) {
+  const config = agentConfig();
+  const view = renderBot({ agentAuth: config, ...props });
+  return { ...view, config };
+}
+
+describe('agent mode', () => {
+  it('does not mint on mount', async () => {
+    renderAgentBot();
+    await settle();
+
+    expect(mintCalls()).toHaveLength(0);
+  });
+
+  it('mints when the embedded chat is first focused', async () => {
+    fetchMock.mockResolvedValue(minted('t1'));
+    renderAgentBot();
+    await settle();
+
+    act(() => {
+      document.querySelector('textarea')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    await settle();
+
+    expect(mintCalls()).toHaveLength(1);
+  });
+
+  it('mints when the floating chat opens, not when it closes', async () => {
+    fetchMock.mockResolvedValue(minted('t1'));
+    renderAgentBot({ embedded: false });
+    await settle();
+    const toggle = (newState: boolean) =>
+      act(() => {
+        const event = new Event('rcb-toggle-chat-window') as Event & { data?: unknown };
+        event.data = { currState: !newState, newState };
+        window.dispatchEvent(event);
+      });
+
+    toggle(false);
+    await settle();
+    expect(mintCalls()).toHaveLength(0);
+
+    toggle(true);
+    await settle();
+    expect(mintCalls()).toHaveLength(1);
+  });
+
+  it('shows neither sign-in nor the user icon before the first mint', async () => {
+    renderAgentBot({ isLoggedIn: false });
+    await settle();
+
+    expect(headerLogin()).not.toBeInTheDocument();
+    expect(document.querySelector('.qa-bot')).not.toHaveClass('bot-logged-in');
+  });
+
+  it('ignores the host isLoggedIn', async () => {
+    renderAgentBot({ isLoggedIn: false });
+    await settle();
+
+    expect(screen.queryByText('To ask questions, please log in first.')).not.toBeInTheDocument();
+  });
+
+  it('follows the mint in the header and keeps the conversation', async () => {
+    fetchMock.mockResolvedValue(minted('t1'));
+    const { ref } = renderAgentBot();
+    await settle();
+    act(() => ref.current?.addMessage('An earlier answer'));
+    await settle();
+
+    act(() => {
+      document.querySelector('textarea')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    await settle();
+
+    expect(document.querySelector('.qa-bot')).toHaveClass('bot-logged-in');
+    expect(screen.getByText('An earlier answer')).toBeInTheDocument();
+    expect(screen.getAllByText('Welcome to the bot')).toHaveLength(1);
+  });
+
+  it('shows sign-in in the header when the user is signed out', async () => {
+    fetchMock.mockResolvedValue(loginRequired());
+    renderAgentBot();
+    await settle();
+
+    act(() => {
+      document.querySelector('textarea')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    await settle();
+
+    expect(headerLogin()).toBeInTheDocument();
+    expect(document.querySelector('.qa-bot')).not.toHaveClass('bot-logged-in');
+  });
+
+  it('starts a clean conversation and clears history when the user signs out', async () => {
+    fetchMock.mockResolvedValueOnce(minted('t1')).mockResolvedValue(loginRequired());
+    const { ref, config } = renderAgentBot();
+    await settle();
+    act(() => {
+      document.querySelector('textarea')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    await settle();
+    act(() => ref.current?.addMessage('An earlier answer'));
+    await settle();
+    localStorage.setItem('qa_bot_session_messages', JSON.stringify({ old: { messages: [], startedAt: '', preview: '' } }));
+
+    const { getAgentTokenSource } = await import('../utils/agent-token');
+    await act(async () => {
+      await getAgentTokenSource(config.tokenUrl).refresh();
+    });
+    await settle(300);
+
+    expect(screen.queryByText('An earlier answer')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Welcome to the bot')).toHaveLength(1);
+    expect(screen.getByText("You've been signed out, so this is a new conversation.")).toBeInTheDocument();
+    const stored = JSON.parse(localStorage.getItem('qa_bot_session_messages') ?? '{}');
+    expect(stored.old).toBeUndefined();
+    expect(JSON.stringify(stored)).not.toContain('An earlier answer');
+  });
+
+  it('behaves as if unset when the config is invalid', async () => {
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    renderBot({ isLoggedIn: false, agentAuth: { ...agentConfig(), tokenUrl: 'not a url' } });
+    await settle();
+
+    expect(headerLogin()).toBeInTheDocument();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it('offers sign-in after a failed mint instead of an empty header', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    renderAgentBot();
+    await settle();
+
+    act(() => {
+      document.querySelector('textarea')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    await settle();
+
+    expect(headerLogin()).toBeInTheDocument();
+  });
+
+  it('warns when questions would go to another origin than the agent', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    renderAgentBot({ qaEndpoint: 'https://rag.example/chat' });
+    await settle();
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('qaEndpoint'));
+    warn.mockRestore();
+  });
+
+  it('does not warn when questions go to the agent', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    renderAgentBot({ qaEndpoint: 'https://agent.example/api/v1/query' });
+    await settle();
+
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('qaEndpoint'));
+    warn.mockRestore();
   });
 });

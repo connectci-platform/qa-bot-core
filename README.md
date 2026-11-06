@@ -165,7 +165,8 @@ bot.destroy();
 | `isLoggedIn` | boolean | ✅ | Whether the user is logged in. Controls header icon and Q&A access gating |
 | `ratingEndpoint` | string | ❌ | Rating API endpoint URL (enables thumbs up/down) |
 | `allowAnonAccess` | boolean | ❌ | Allow Q&A access even when not logged in (default: `false`) |
-| `actingUser` | string | ❌ | Acting user identifier sent to backend as `X-Acting-User` header and `acting_user` body field |
+| `actingUser` | string | ❌ | Not sent anywhere; kept so existing callers still type-check |
+| `agentAuth` | AgentAuthConfig | ❌ | Agent mode: sign in to the agent with a Bearer token (see Agent Mode). Off when unset |
 | `loginUrl` | string | ❌ | Login URL for the login button when not logged in (default: `/login`) |
 | `open` | boolean | ❌ | Control chat window open/closed state |
 | `onOpenChange` | function | ❌ | Callback when chat window state changes: `(open: boolean) => void` |
@@ -228,6 +229,55 @@ If you want to allow Q&A access without requiring login, use the `allowAnonAcces
 ```
 
 This bypasses the login gate for Q&A while still showing the login button in the header. Note that custom flows (if any) are unaffected by this setting.
+
+### Agent Mode
+
+With `agentAuth` set, the bot authenticates to the agent with a short-lived
+Bearer token from the program's identity site instead of cookies. Unset, the
+bot behaves exactly as before. The config belongs in the program's wrapper
+(for ACCESS, `@snf/access-qa-bot`), not in a prop an embedding page can set.
+
+```jsx
+<QABot
+  apiKey="your-api-key"
+  qaEndpoint="https://agent.example.org/api/v1/query"
+  welcomeMessage="Hello! How can I help you today?"
+  isLoggedIn={false} // ignored in agent mode
+  agentAuth={{
+    tokenUrl: 'https://support.example.org/api/agent-token',
+    loginUrl: 'https://support.example.org/user/login',
+    agentUrl: 'https://agent.example.org',
+    signInText: 'Sign in to continue.', // optional
+  }}
+/>
+```
+
+How it behaves:
+- **The token goes only to the agent.** Requests whose origin matches
+  `agentUrl` drop cookies and carry `Authorization: Bearer …`; every other
+  request (a RAG endpoint, a proxy path) is sent as before, with no token.
+  `agentUrl` must be https unless the page itself is on localhost.
+- **Signed-in state comes from the token**, not from `isLoggedIn`, and
+  `loginUrl` is ignored. Sign-in opens `agentAuth.loginUrl` in a popup and
+  fetches a token when it closes.
+- **Tokens are fetched when the chat is first opened**: when the floating bot
+  opens, or on the embedded bot's first focus or send. A page view never
+  fetches one. A signed-out user who opened the chat is checked again when the
+  window regains focus, at most once a minute.
+- **A failed token request is quiet** until a sign-in is actually needed; the
+  chat continues anonymously meanwhile (subject to `allowAnonAccess`).
+- **When the agent refuses a tool**, the bot explains after the reply: a
+  sign-in prompt, or "Changes aren't available here." when this site can't
+  make changes.
+- **Signing out starts a new conversation and clears saved history**, which is
+  one store for everyone using the browser. A thread the agent no longer lets
+  this page continue also starts over.
+- **One token source per identity site per bundle.** Bots in the same bundle
+  share it; a separately bundled copy has its own.
+
+Wrappers that make their own agent requests use the same token and 401
+handling through the exports `getAgentTokenSource`, `agentFetch` and
+`useAgentAuthStatus`.
 
 ### Chat Window Control
 
@@ -578,6 +628,27 @@ REACT_APP_API_KEY=your-api-key
 REACT_APP_QA_ENDPOINT=https://your-api.com/chat
 REACT_APP_RATING_ENDPOINT=https://your-api.com/rating  # optional
 ```
+
+**Agent mode locally**
+
+Minting needs the page to be same-site with the identity site, so a
+`localhost` page can't sign in to a ddev Drupal. Serve the demo from
+`https://chat.accessmatch.ddev.site`: its ddev nginx rule sends `/api/` to
+the agent on port 8000 and everything else to port 3000, where `npm start`
+listens (stop any other dev server there first). In `.env.development.local`:
+
+```bash
+REACT_APP_QA_ENDPOINT=https://chat.accessmatch.ddev.site/api/v1/query
+REACT_APP_AGENT_RATING_ENDPOINT=https://chat.accessmatch.ddev.site/api/v1/rating
+REACT_APP_AGENT_URL=https://chat.accessmatch.ddev.site
+REACT_APP_SUPPORT_URL=https://accessmatch.ddev.site
+# CRA rejects the proxied Host header, and hot reload comes back through nginx.
+DANGEROUSLY_DISABLE_HOST_CHECK=true
+WDS_SOCKET_PORT=443
+```
+
+Then tick **Agent sign-in** in the demo. The origin must be registered in the
+ddev site's `access.token_exchange` config.
 
 ### Building
 

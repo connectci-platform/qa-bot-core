@@ -51,6 +51,8 @@ const config = [
         // Only process .ts/.tsx — let Babel handle .js/.jsx files to avoid
         // TS5055 "cannot write file" warnings when .js output collides with .js source.
         include: ['src/**/*.ts', 'src/**/*.tsx'],
+        // Tests and their helpers aren't part of the published types.
+        exclude: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'src/test-utils/**'],
       }),
       babel({
         babelHelpers: 'bundled',

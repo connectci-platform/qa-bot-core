@@ -3,7 +3,7 @@ import { useEffect, useCallback } from 'react';
 import { RcbPreInjectMessageEvent } from 'react-chatbotify';
 import { useSession } from '../contexts/SessionContext';
 import { addMessageToSession } from '../utils/session-utils';
-import { extractTextFromJsx } from '../utils/jsx-text-extractor';
+import { extractTextFromJsx, isTransientMessage } from '../utils/jsx-text-extractor';
 import { logger } from '../utils/logger';
 
 /**
@@ -46,6 +46,10 @@ const SessionMessageTracker: React.FC = () => {
     const message = rcbEvent.data?.message;
 
     if (!message?.id) {
+      return;
+    }
+
+    if (isTransientMessage(message.content)) {
       return;
     }
 

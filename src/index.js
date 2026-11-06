@@ -22,6 +22,15 @@ function ExampleApp() {
   // Agent-targeted answers (rating_target: "agent") rate to this endpoint.
   // Without it, those answers show no thumbs even when ratingEndpoint is set.
   const agentRatingEndpoint = process.env.REACT_APP_AGENT_RATING_ENDPOINT || null;
+  // Agent mode: tokens from the identity site at REACT_APP_SUPPORT_URL, sent
+  // only to REACT_APP_AGENT_URL. See "Agent mode" in the README.
+  const agentUrl = process.env.REACT_APP_AGENT_URL || null;
+  const supportUrl = (process.env.REACT_APP_SUPPORT_URL || '').replace(/\/$/, '') || null;
+  const agentAuthConfig = agentUrl && supportUrl
+    ? { tokenUrl: `${supportUrl}/api/agent-token`, loginUrl: `${supportUrl}/user/login`, agentUrl }
+    : null;
+  const [agentMode, setAgentMode] = useState(false);
+  const agentAuth = agentMode && agentAuthConfig ? agentAuthConfig : undefined;
 
   // Environment variables are now used directly
 
@@ -112,6 +121,16 @@ function ExampleApp() {
               <span>{embedded ? 'Embedded mode (always visible)' : 'Floating mode (toggle button)'}</span>
               <code className="demo-prop-name">embedded={embedded ? 'true' : 'false'}</code>
             </label>
+            <label className="demo-checkbox">
+              <input
+                type="checkbox"
+                checked={agentMode}
+                onChange={(e) => setAgentMode(e.target.checked)}
+                disabled={!agentAuthConfig}
+              />
+              <span>{agentAuthConfig ? (agentMode ? 'Agent sign-in on' : 'Agent sign-in off') : 'Agent sign-in (set REACT_APP_AGENT_URL and REACT_APP_SUPPORT_URL)'}</span>
+              <code className="demo-prop-name">agentAuth={agentMode ? '{…}' : 'undefined'}</code>
+            </label>
           </div>
 
           <div className="demo-section">
@@ -150,7 +169,7 @@ function ExampleApp() {
               <h2>Embedded Mode Preview</h2>
               <p className="demo-help">Bot displays inline, always visible</p>
               <QABot
-                key="embedded-mode"
+                key={`embedded-mode-${agentMode}`}
                 ref={botRef}
                 apiKey={apiKey}
                 qaEndpoint={qaEndpoint}
@@ -166,6 +185,7 @@ function ExampleApp() {
                 embedded={true}
                 actingUser="demo-user@access-ci.org"
                 onAnalyticsEvent={handleAnalyticsEvent}
+                agentAuth={agentAuth}
               />
             </div>
           ) : (
@@ -183,7 +203,7 @@ function ExampleApp() {
       {/* Floating bot (only rendered when not embedded) */}
       {!embedded && (
         <QABot
-          key="floating-mode"
+          key={`floating-mode-${agentMode}`}
           ref={botRef}
           apiKey={apiKey}
           qaEndpoint={qaEndpoint}
@@ -199,6 +219,7 @@ function ExampleApp() {
           embedded={false}
           actingUser="demo-user@access-ci.org"
           onAnalyticsEvent={handleAnalyticsEvent}
+          agentAuth={agentAuth}
         />
       )}
     </div>

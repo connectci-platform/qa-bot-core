@@ -176,6 +176,8 @@ bot.destroy();
 | `placeholder` | string | ❌ | Input placeholder text |
 | `errorMessage` | string | ❌ | Error state message |
 | `tooltipText` | string | ❌ | Tooltip text for chat toggle |
+| `tooltipOncePerSession` | boolean | ❌ | Stop showing the tooltip once the chat has been opened this session (default: true) |
+| `tooltipBottomOffset` | number | ❌ | Hide the tooltip within this many pixels of the page bottom, where the footer is (default: 300) |
 | `embedded` | boolean | ❌ | Embedded mode (default: `false`) |
 | `footerText` | string | ❌ | Footer text |
 | `footerLink` | string | ❌ | Footer link URL |

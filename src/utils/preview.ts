@@ -89,43 +89,83 @@ const FLAG_NOTES: Record<string, string> = {
 
 const HIDDEN = new Set(['preview_id', 'status', 'action']);
 
-const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", nbsp: ' ' };
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 
-/**
- * HTML from a body field as the text a reader sees. A link keeps its target
- * and an image its source, since the card is what the user approves.
- */
-export function htmlText(html: string): string {
-  if (!/<\/?[a-z][^>]*>/i.test(html)) return html;
-  const attr = (tag: string, name: string) =>
-    new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i')
-      .exec(tag)
-      ?.slice(1)
-      .find((v) => v !== undefined);
-  return html
-    .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, (tag, text: string) => {
-      const href = attr(tag, 'href');
-      return href ? `${text} (${href})` : text;
-    })
-    .replace(/<img\b[^>]*>/gi, (tag) => {
-      const src = attr(tag, 'src');
-      return src ? `[image: ${src}]` : '[image]';
-    })
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/li>/gi, '\n')
-    .replace(/<\/(p|div|h[1-6]|ul|ol|blockquote)>/gi, '\n\n')
-    .replace(/<li\b[^>]*>/gi, '• ')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (_, e: string) => ENTITIES[e])
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+/** Entities decoded once, as a browser shows them. */
+function decode(text: string): string {
+  return text.replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi, (whole, dec?: string, hex?: string, name?: string) => {
+    if (name) return ENTITIES[name.toLowerCase()] ?? whole;
+    const code = dec ? Number(dec) : parseInt(hex ?? '', 16);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
 }
 
-function scalar(value: unknown): string {
+// A comment, or a tag whose attributes may hold quoted ">".
+const TAG = /<!--[\s\S]*?(?:-->|$)|<(\/?)([a-z][^\s/>]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/gi;
+const ATTR = /([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+// Attributes that load or link somewhere, shown for any tag that has them.
+const URL_ATTRS = ['href', 'src', 'srcset', 'action', 'formaction', 'data', 'poster', 'background'];
+const BLOCKS = /^(p|div|h[1-6]|ul|ol|blockquote|table|tr|pre)$/;
+
+/** A tag's attributes, the first of each name winning as in a browser. */
+function attributes(source: string): Map<string, string> {
+  const attrs = new Map<string, string>();
+  for (const [, name, d, s, bare] of source.matchAll(ATTR)) {
+    const key = name.toLowerCase();
+    if (!attrs.has(key)) attrs.set(key, decode(d ?? s ?? bare ?? ''));
+  }
+  return attrs;
+}
+
+/**
+ * HTML from a body field as the text a reader sees. Every link target and
+ * every source a tag loads stays in view, since the card is what the user
+ * approves.
+ */
+export function htmlText(html: string): string {
+  let out = '';
+  let last = 0;
+  const links: string[] = [];
+  const closeLink = () => {
+    const href = links.pop();
+    if (href) out += ` (${href})`;
+  };
+  for (const match of html.matchAll(TAG)) {
+    out += decode(html.slice(last, match.index));
+    last = (match.index ?? 0) + match[0].length;
+    const [, slash, rawName, rawAttrs] = match;
+    if (rawName === undefined) continue;
+    const name = rawName.toLowerCase();
+    if (slash) {
+      if (name === 'a') closeLink();
+      else if (name === 'li') out += '\n';
+      else if (BLOCKS.test(name)) out += '\n\n';
+      continue;
+    }
+    const attrs = attributes(rawAttrs);
+    if (name === 'a') {
+      links.push(attrs.get('href') ?? '');
+      continue;
+    }
+    if (name === 'br') out += '\n';
+    else if (name === 'li') out += '• ';
+    const urls = URL_ATTRS.flatMap((a) => attrs.get(a) || []);
+    if (name === 'img') out += urls.length ? `[image: ${urls.join(', ')}]` : '[image]';
+    else if (urls.length) out += `[${name}: ${urls.join(', ')}]`;
+  }
+  out += decode(html.slice(last));
+  while (links.length) closeLink();
+  return out.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Fields whose value is HTML: an announcement body, an event description. */
+const isHtmlField = (key: string) => /(^|_)(body|description)$/i.test(key);
+
+function scalar(value: unknown, html = false): string {
   if (value === null || value === undefined || value === '') return 'none';
-  if (typeof value === 'string') return htmlText(value);
+  if (typeof value === 'string') return html ? htmlText(value) : value;
   if (typeof value === 'boolean') return value ? 'yes' : 'no';
-  if (Array.isArray(value)) return value.map(scalar).join(', ') || 'none';
+  if (Array.isArray(value)) return value.map((v) => scalar(v, html)).join(', ') || 'none';
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
@@ -134,8 +174,10 @@ const isChange = (value: unknown): value is Record<string, unknown> =>
   isRecord(value) && typeof value.field === 'string';
 
 function changeRow(change: Record<string, unknown>): PreviewRow {
-  const old = change.old_unavailable === true ? 'unknown' : scalar(change.old);
-  return { label: humanize(change.field as string), value: `${old} → ${scalar(change.new)}` };
+  const field = change.field as string;
+  const html = isHtmlField(field);
+  const old = change.old_unavailable === true ? 'unknown' : scalar(change.old, html);
+  return { label: humanize(field), value: `${old} → ${scalar(change.new, html)}` };
 }
 
 /** Flags turned into short sentences, plus rows for the rest of the data. */
@@ -162,10 +204,10 @@ export function previewDetails(data: Record<string, unknown>): { notes: string[]
       rows.push(...value.map(changeRow));
     } else if (isRecord(value)) {
       for (const [inner, innerValue] of Object.entries(value)) {
-        rows.push({ label: `${humanize(key)} ${inner.replace(/[_-]+/g, ' ')}`, value: scalar(innerValue) });
+        rows.push({ label: `${humanize(key)} ${inner.replace(/[_-]+/g, ' ')}`, value: scalar(innerValue, isHtmlField(inner)) });
       }
     } else {
-      rows.push({ label: humanize(key), value: scalar(value) });
+      rows.push({ label: humanize(key), value: scalar(value, isHtmlField(key)) });
     }
   }
   return { notes, rows };

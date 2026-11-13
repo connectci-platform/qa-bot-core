@@ -142,6 +142,41 @@ describe('card values', () => {
     expect(previewDetails({ body: '<b>Hi</b> there' }).rows).toEqual([{ label: 'Body', value: 'Hi there' }]);
   });
 
+  it('reads HTML only in body and description fields', () => {
+    expect(
+      previewDetails({
+        description: '<b>Bold</b>',
+        title: 'Use <b> tags',
+        changes: [{ field: 'body', old: '<p>A</p>', new: '<p>B</p>' }],
+      }).rows,
+    ).toEqual([
+      { label: 'Description', value: 'Bold' },
+      { label: 'Title', value: 'Use <b> tags' },
+      { label: 'Body', value: 'A → B' },
+    ]);
+  });
+});
+
+describe("htmlText doesn't hide where a link goes", () => {
+  const evil = 'https://evil.example';
+
+  it.each([
+    ['an unquoted href', `<a href=${evil}>the docs</a>`],
+    ['a slash before href', `<a/href="${evil}">the docs</a>`],
+    ['an unclosed link', `<a href="${evil}">the docs`],
+    ['a quoted > in another attribute', `<a title="a>b" href="${evil}">the docs</a>`],
+    ['a fake href inside the link text', `<a href=${evil}><span title=' href="https://access-ci.org"'>the docs</span></a>`],
+  ])('with %s', (_, html) => {
+    expect(htmlText(html)).toBe(`the docs (${evil})`);
+  });
+
+  it('shows what other tags load, decoded', () => {
+    expect(htmlText(`<img src=${evil}/t.png>`)).toBe(`[image: ${evil}/t.png]`);
+    expect(htmlText(`<iframe src="${evil}"></iframe>`)).toBe(`[iframe: ${evil}]`);
+    expect(htmlText('<a href="java&#115;cript:x">y</a>')).toBe('y (javascript:x)');
+    expect(htmlText('<p>&amp;lt;b&amp;gt;<!-- <a href="x"> --></p>')).toBe('&lt;b&gt;');
+  });
+
   it('shows the local time in place of the UTC one', () => {
     expect(
       previewDetails({

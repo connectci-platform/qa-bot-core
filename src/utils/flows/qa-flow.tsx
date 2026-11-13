@@ -415,11 +415,16 @@ export const createQAFlow = ({
   const handleTurnstileResubmit = async (token: string | null): Promise<ResubmitResult> => {
     if (agent && resubmitting) return 'busy';
     resubmitting = true;
+    // A resubmit is a reply coming in, so a card's buttons wait for it.
+    sending = true;
+    notifyCards();
     let result: ResubmitResult;
     try {
       result = await resubmitPending(token);
     } finally {
       resubmitting = false;
+      sending = false;
+      notifyCards();
     }
     if (agent && result === 'needs_another_challenge') {
       // A widget resend that went out before the user signed in: send again

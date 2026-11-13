@@ -890,6 +890,31 @@ describe('preview card', () => {
     expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
   });
 
+  it('waits while a challenged question is resubmitted', async () => {
+    const flow = makeFlow();
+    const { state, type } = await cardTurn(flow);
+    render(cardIn(state)!);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ requires_turnstile: true, site_key: 'site' }));
+    await act(async () => {
+      await type('What does this change?');
+    });
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+    let finish: (r: Response) => void = () => {};
+    fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => (finish = resolve)));
+
+    let pending: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      pending = flow.qa_loop.component.props.onResubmit('turnstile-token');
+    });
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
+
+    await act(async () => {
+      finish(agentAnswer('It posts the announcement.'));
+      await pending;
+    });
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+  });
+
   it('ends a card when cancel is typed', async () => {
     const flow = makeFlow();
     const { state, type } = await cardTurn(flow);

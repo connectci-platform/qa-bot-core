@@ -856,18 +856,65 @@ describe('preview card', () => {
     expect(screen.queryByRole('button', { name: /Confirm/ })).not.toBeInTheDocument();
   });
 
-  it('disables an earlier card once a newer question is sent', async () => {
+  it('keeps a card usable through a typed reply, which cannot confirm it', async () => {
     const flow = makeFlow();
     const { state, type } = await cardTurn(flow);
     render(cardIn(state)!);
-    fetchMock.mockResolvedValueOnce(agentAnswer());
+    fetchMock.mockResolvedValueOnce(agentAnswer('Please click Confirm on the card.'));
 
     await act(async () => {
-      await type('Actually, never mind');
+      await type('yes, post it');
+    });
+
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+  });
+
+  it('waits while a reply is coming in', async () => {
+    const flow = makeFlow();
+    const { state, type } = await cardTurn(flow);
+    render(cardIn(state)!);
+    let finish: (r: Response) => void = () => {};
+    fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => (finish = resolve)));
+
+    let pending: Promise<void> = Promise.resolve();
+    await act(async () => {
+      pending = type('What does this change?');
+    });
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
+
+    await act(async () => {
+      finish(agentAnswer('It posts the announcement.'));
+      await pending;
+    });
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+  });
+
+  it('ends a card when cancel is typed', async () => {
+    const flow = makeFlow();
+    const { state, type } = await cardTurn(flow);
+    render(cardIn(state)!);
+    fetchMock.mockResolvedValueOnce(agentAnswer('Nothing was changed.'));
+
+    await act(async () => {
+      await type('Cancel.');
     });
 
     expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  });
+
+  it('disables an earlier card once a newer card is shown', async () => {
+    const flow = makeFlow();
+    const { state, type } = await cardTurn(flow);
+    const { unmount } = render(cardIn(state)!);
+    fetchMock.mockResolvedValueOnce(withPreviews([registration(ID_B)]));
+
+    await act(async () => {
+      await type('Make it the other workshop');
+    });
+
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
+    unmount();
   });
 
   it('carries the Bearer token on a confirm in agent mode', async () => {

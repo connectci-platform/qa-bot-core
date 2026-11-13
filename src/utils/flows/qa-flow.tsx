@@ -298,9 +298,12 @@ export const createQAFlow = ({
   // The card click being sent, read once by the qa_loop step it starts.
   let cardSend: { text: string; confirmIds: string[] } | null = null;
 
-  // Counts sends. A preview card belongs to one turn, and a newer send
-  // leaves its buttons disabled.
-  let turn = 0;
+  // A preview card stays usable through typed replies, which can't confirm
+  // it, until the user clicks Confirm or Cancel (or types cancel) or a newer
+  // card replaces it. Its buttons wait while a reply is coming in.
+  let latestCard = 0;
+  let answeredCard = 0;
+  let sending = false;
   const turnListeners = new Set<() => void>();
   const subscribeTurn = (listener: () => void) => {
     turnListeners.add(listener);
@@ -308,10 +311,8 @@ export const createQAFlow = ({
       turnListeners.delete(listener);
     };
   };
-  const startTurn = () => {
-    turn += 1;
-    turnListeners.forEach((listener) => listener());
-  };
+  const notifyCards = () => turnListeners.forEach((listener) => listener());
+  const isCancel = (text: string) => text.trim().toLowerCase().replace(/[.!]+$/, '') === 'cancel';
 
   // Agent requests carry the token; everything else is today's fetch.
   const request = (url: string, init: RequestInit) =>
@@ -634,7 +635,18 @@ export const createQAFlow = ({
   // the session, token, headers and Turnstile handling. Returns a message
   // for the caller to show, like the flow's message function.
   const ask = async (chatState: ChatIO, userInput: string, confirmIds?: string[]): Promise<string | void> => {
-    startTurn();
+    sending = true;
+    if (confirmIds?.length || isCancel(userInput)) answeredCard = latestCard;
+    notifyCards();
+    try {
+      return await send(chatState, userInput, confirmIds);
+    } finally {
+      sending = false;
+      notifyCards();
+    }
+  };
+
+  const send = async (chatState: ChatIO, userInput: string, confirmIds?: string[]): Promise<string | void> => {
     // A reset during this send means its conversation is gone; stop
     // writing into the new one.
     const generation = agent?.resetGeneration();
@@ -983,13 +995,15 @@ export const createQAFlow = ({
 
   // Not saved to history: its buttons can't be restored.
   const previewCard = (previews: Preview[]) => {
-    const cardTurn = turn;
+    latestCard += 1;
+    const card = latestCard;
+    notifyCards();
     return (
       <div data-transient data-preview-card className="rcb-bot-message-container qa-bot-preview-card-container">
         <PreviewCard
           previews={previews}
           onSend={sendFromCard}
-          isStale={() => turn !== cardTurn}
+          isStale={() => sending || card !== latestCard || answeredCard >= card}
           subscribe={subscribeTurn}
         />
       </div>

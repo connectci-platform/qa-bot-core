@@ -21,7 +21,7 @@ export const MAX_CONFIRM_IDS = 10;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 
-/** The done event's previews, skipping any entry without a valid id. */
+/** The done event's previews, skipping any entry without a valid id or with a repeated one. */
 export function parsePreviews(raw: unknown): Preview[] {
   if (!Array.isArray(raw)) return [];
   const previews: Preview[] = [];
@@ -29,6 +29,8 @@ export function parsePreviews(raw: unknown): Preview[] {
     if (!isRecord(entry)) continue;
     const id = entry.preview_id;
     if (typeof id !== 'string' || !PREVIEW_ID.test(id)) continue;
+    // Identical calls in one step share an id; the card shows it once.
+    if (previews.some((p) => p.previewId === id)) continue;
     const data = isRecord(entry.data) ? entry.data : {};
     previews.push({
       previewId: id,
@@ -87,8 +89,41 @@ const FLAG_NOTES: Record<string, string> = {
 
 const HIDDEN = new Set(['preview_id', 'status', 'action']);
 
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", nbsp: ' ' };
+
+/**
+ * HTML from a body field as the text a reader sees. A link keeps its target
+ * and an image its source, since the card is what the user approves.
+ */
+export function htmlText(html: string): string {
+  if (!/<\/?[a-z][^>]*>/i.test(html)) return html;
+  const attr = (tag: string, name: string) =>
+    new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i')
+      .exec(tag)
+      ?.slice(1)
+      .find((v) => v !== undefined);
+  return html
+    .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, (tag, text: string) => {
+      const href = attr(tag, 'href');
+      return href ? `${text} (${href})` : text;
+    })
+    .replace(/<img\b[^>]*>/gi, (tag) => {
+      const src = attr(tag, 'src');
+      return src ? `[image: ${src}]` : '[image]';
+    })
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|ul|ol|blockquote)>/gi, '\n\n')
+    .replace(/<li\b[^>]*>/gi, '• ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (_, e: string) => ENTITIES[e])
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function scalar(value: unknown): string {
   if (value === null || value === undefined || value === '') return 'none';
+  if (typeof value === 'string') return htmlText(value);
   if (typeof value === 'boolean') return value ? 'yes' : 'no';
   if (Array.isArray(value)) return value.map(scalar).join(', ') || 'none';
   if (typeof value === 'object') return JSON.stringify(value);
@@ -109,6 +144,16 @@ export function previewDetails(data: Record<string, unknown>): { notes: string[]
   const rows: PreviewRow[] = [];
   for (const [key, value] of Object.entries(data)) {
     if (HIDDEN.has(key)) continue;
+    // A time the user can read stands in for its UTC form: start_local for
+    // start_date, shown as "Start".
+    const local = key.match(/^(.*)_local$/)?.[1];
+    if (local && typeof value === 'string' && value) {
+      rows.push({ label: humanize(local), value });
+      continue;
+    }
+    const dated = key.match(/^(.*)_date$/)?.[1];
+    const localOf = dated && data[`${dated}_local`];
+    if (typeof localOf === 'string' && localOf) continue;
     if (key in FLAG_NOTES) {
       if (value === true) notes.push(FLAG_NOTES[key]);
       continue;

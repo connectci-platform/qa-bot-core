@@ -1,4 +1,4 @@
-import { MAX_CONFIRM_IDS, parsePreviews, previewDetails, previewTitle } from './preview';
+import { htmlText, MAX_CONFIRM_IDS, parsePreviews, previewDetails, previewTitle } from './preview';
 
 const ID_A = 'a'.repeat(32);
 const ID_B = 'b'.repeat(32);
@@ -123,4 +123,35 @@ describe('previewDetails', () => {
 
 it('caps a confirm at ten ids', () => {
   expect(MAX_CONFIRM_IDS).toBe(10);
+});
+
+describe('card values', () => {
+  it('lists a repeated preview id once', () => {
+    const entry = { preview_id: 'a'.repeat(32), tool: 'create_announcement', data: {} };
+    expect(parsePreviews([entry, entry])).toHaveLength(1);
+  });
+
+  it("shows a body's HTML as text, keeping link targets and image sources", () => {
+    expect(htmlText('<p>One &amp; two.</p><p>Three<br>four</p>')).toBe('One & two.\n\nThree\nfour');
+    expect(htmlText('<p>See <a href="https://evil.example/x">the docs</a></p>')).toBe(
+      'See the docs (https://evil.example/x)',
+    );
+    expect(htmlText("<img src='/a.png'>")).toBe('[image: /a.png]');
+    expect(htmlText('<ul><li>A</li><li>B</li></ul>')).toBe('• A\n• B');
+    expect(htmlText('2 < 3 and 5 > 4')).toBe('2 < 3 and 5 > 4');
+    expect(previewDetails({ body: '<b>Hi</b> there' }).rows).toEqual([{ label: 'Body', value: 'Hi there' }]);
+  });
+
+  it('shows the local time in place of the UTC one', () => {
+    expect(
+      previewDetails({
+        start_date: '2026-11-19T19:00:00Z',
+        start_local: 'Thu, Nov 19, 2026, 1:00 PM CST',
+        end_date: '2026-11-19T20:00:00Z',
+      }).rows,
+    ).toEqual([
+      { label: 'Start', value: 'Thu, Nov 19, 2026, 1:00 PM CST' },
+      { label: 'End date', value: '2026-11-19T20:00:00Z' },
+    ]);
+  });
 });

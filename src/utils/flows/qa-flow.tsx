@@ -4,6 +4,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { getProcessedText } from '../getProcessedText';
 import LoginButton from '../../components/LoginButton';
 import TurnstileWidget from '../../components/TurnstileWidget';
+import PreviewCard from '../../components/PreviewCard';
+import { parsePreviews } from '../preview';
+import type { Preview } from '../preview';
 import { logger, isDebugEnabled } from '../logger';
 import { viteEnv } from '../vite-env';
 import { agentFetch, isAgentRequest } from '../agent-fetch';
@@ -29,6 +32,13 @@ export interface AgentFlowContext {
   hostEnabled(): boolean;
   /** Goes up on every reset, so a send can tell its conversation is gone. */
   resetGeneration(): number;
+}
+
+/** The part of react-chatbotify's flow params a send writes through. */
+interface ChatIO {
+  injectMessage: (content: string | React.ReactElement, sender?: string) => Promise<unknown>;
+  streamMessage: (content: string | React.ReactElement, sender?: string) => Promise<unknown>;
+  endStreamMessage: (sender?: string) => Promise<unknown>;
 }
 
 const STILL_ANSWERING = 'Still answering your last question.';
@@ -269,7 +279,12 @@ export const createQAFlow = ({
   const turnstileState = {
     siteKey: null as string | null,
     token: null as string | null,
-    pendingQuery: null as { query: string; sessionId: string | null; queryId: string } | null,
+    pendingQuery: null as {
+      query: string;
+      sessionId: string | null;
+      queryId: string;
+      confirmIds?: string[];
+    } | null,
     needsChallenge: false,
     challenge: 0,
   };
@@ -277,6 +292,23 @@ export const createQAFlow = ({
   // Mutable ref to injectMessage — captured from chatState on each message call
   // so the Turnstile onVerify callback can inject responses into the chat.
   let injectMessage: ((msg: string | React.ReactElement) => Promise<unknown>) | null = null;
+  // The latest chat params, so a preview card's buttons can send a turn.
+  let lastChat: ChatIO | null = null;
+
+  // Counts sends. A preview card belongs to one turn, and a newer send
+  // leaves its buttons disabled.
+  let turn = 0;
+  const turnListeners = new Set<() => void>();
+  const subscribeTurn = (listener: () => void) => {
+    turnListeners.add(listener);
+    return () => {
+      turnListeners.delete(listener);
+    };
+  };
+  const startTurn = () => {
+    turn += 1;
+    turnListeners.forEach((listener) => listener());
+  };
 
   // Agent requests carry the token; everything else is today's fetch.
   const request = (url: string, init: RequestInit) =>
@@ -426,10 +458,13 @@ export const createQAFlow = ({
       }
       headers['X-Origin'] = resourceContext || 'access';
 
-      const retryBody: Record<string, string> = {
+      const retryBody: Record<string, unknown> = {
         query: turnstileState.pendingQuery.query,
         question_id: turnstileState.pendingQuery.queryId,
       };
+      if (turnstileState.pendingQuery.confirmIds) {
+        retryBody.confirm_ids = turnstileState.pendingQuery.confirmIds;
+      }
       if (token !== null) {
         retryBody.turnstile_token = token;
       }
@@ -480,6 +515,7 @@ export const createQAFlow = ({
         let collectedTokens = '';
         let doneMetadata: Record<string, unknown> = {};
         let refusal: string | null = null;
+        let previews: Preview[] = [];
 
         while (true) {
           const { done, value } = await reader.read();
@@ -501,7 +537,10 @@ export const createQAFlow = ({
               try {
                 const parsed = JSON.parse(evData);
                 if (evType === 'token') collectedTokens += (parsed.content || '');
-                else if (evType === 'done') doneMetadata = (parsed.metadata as Record<string, unknown>) || {};
+                else if (evType === 'done') {
+                  doneMetadata = (parsed.metadata as Record<string, unknown>) || {};
+                  previews = parsePreviews(parsed.previews);
+                }
                 else if (evType === 'requires_auth' && agent) refusal = (parsed.reason as string) || null;
               } catch { /* skip malformed */ }
             }
@@ -524,6 +563,7 @@ export const createQAFlow = ({
         if (collectedTokens) await show(getProcessedText(collectedTokens));
         notifyTurnstile();
         if (refusal) await show(refusalMessage(refusal));
+        if (previews.length > 0) await show(previewCard(previews));
 
         trackEvent?.({
           type: 'chatbot_answer_received',
@@ -586,6 +626,379 @@ export const createQAFlow = ({
     }
   };
 
+  // Sends one question and shows its answer. A typed question and a
+  // preview card's Confirm or Cancel both come through here, so they share
+  // the session, token, headers and Turnstile handling. Returns a message
+  // for the caller to show, like the flow's message function.
+  const ask = async (chatState: ChatIO, userInput: string, confirmIds?: string[]): Promise<string | void> => {
+    startTurn();
+    // A reset during this send means its conversation is gone; stop
+    // writing into the new one.
+    const generation = agent?.resetGeneration();
+    const abandoned = () => agent !== undefined && agent.resetGeneration() !== generation;
+    try {
+      if (agent) {
+        if (!agent.hostEnabled()) {
+          return 'To ask questions, please log in first.';
+        }
+        // Wait for the first mint, so a send never goes out before the
+        // bot knows whether the user is signed in.
+        const status = await agent.ensureStatus();
+        if (!allowAnonAccess && status === 'signed_out') {
+          trackEvent?.({ type: 'chatbot_login_prompt_shown' });
+          await chatState.injectMessage(transient('To ask questions, please sign in first.', true));
+          return;
+        }
+        if (!allowAnonAccess && status !== 'signed_in') {
+          return new AgentTokenError(agent.source.lastFailure() ?? 'temporary').message;
+        }
+        if (status === 'signed_in' && !(await agent.source.getToken())) {
+          // Signed out elsewhere: the agent would refuse this thread to
+          // an anonymous caller, so start over instead of sending.
+          agent.requestReset('signed_out');
+          return;
+        }
+      }
+
+      const queryId = uuidv4();
+      feedbackQueryId = queryId;
+
+      // Track question asked
+      trackEvent?.({
+        type: 'chatbot_question_sent',
+        queryId,
+        questionLength: userInput.length
+      });
+
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      // Add optional headers
+      if (apiKey) {
+        headers['X-API-KEY'] = apiKey;
+      }
+      const currentSessionId = getSessionId();
+      if (currentSessionId) {
+        headers['X-Session-ID'] = currentSessionId;
+        headers['X-Query-ID'] = queryId;
+      }
+      headers['X-Origin'] = resourceContext || 'access';
+      // Build request body — include silent Turnstile token when available
+      const requestBody: Record<string, unknown> = {
+        query: userInput,
+        question_id: queryId
+      };
+      if (confirmIds) {
+        requestBody.confirm_ids = confirmIds;
+      }
+      if (currentSessionId) {
+        requestBody.session_id = currentSessionId;
+      }
+      if (backendId) {
+        requestBody._backend = backendId;
+      }
+      if (resourceContext) {
+        // rp_name is the legacy field name used by qa-bot-proxy.
+        // resource_context is the canonical field name on the agent's
+        // /api/v1/query endpoint. Send both during the transition so the
+        // same client works against either backend without negotiation.
+        requestBody.rp_name = resourceContext;
+        requestBody.resource_context = resourceContext;
+      }
+      const silentToken = getTurnstileToken?.();
+      if (silentToken) {
+        requestBody.turnstile_token = silentToken;
+      }
+
+      // Log the session ID being sent
+      logger.session('SENT to API', {
+        session_id: currentSessionId,
+        question_id: queryId
+      });
+
+      // Capture timestamp before fetch for response time calculation
+      const requestStartTime = Date.now();
+
+      if (abandoned()) {
+        // A reset (say, a sign-out seen while minting) already started a
+        // new conversation; this question belonged to the old one.
+        return;
+      }
+
+      const response = await request(endpoint, {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify(requestBody)
+      });
+
+      const statusReply = await agentStatusReply(endpoint, response);
+      if (statusReply !== null) {
+        return statusReply;
+      }
+
+      if (!response.ok) {
+        throw new Error(`API returned ${response.status}`);
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+
+      // ── SSE streaming path (agent queries) ──────────────────────
+      if (contentType.includes('text/event-stream')) {
+        // Token was accepted — reset widget for a fresh token on the next request.
+        resetTurnstileToken?.();
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('Response body is not readable');
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let tokenContent = '';  // Accumulated LLM tokens
+        let streamStarted = false;
+        let refusal: string | null = null;
+        let previews: Preview[] = [];
+
+        try {
+          while (!abandoned()) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            // Parse SSE events from buffer (events are separated by double newlines)
+            let boundary = buffer.indexOf('\n\n');
+            while (boundary !== -1 && !abandoned()) {
+              const eventBlock = buffer.slice(0, boundary);
+              buffer = buffer.slice(boundary + 2);
+
+              // Parse event type and data from the block
+              let eventType = '';
+              let eventData = '';
+              for (const line of eventBlock.split('\n')) {
+                if (line.startsWith('event: ')) {
+                  eventType = line.slice(7);
+                } else if (line.startsWith('data: ')) {
+                  eventData = line.slice(6);
+                }
+              }
+
+              if (!eventType || !eventData) {
+                boundary = buffer.indexOf('\n\n');
+                continue;
+              }
+
+              let parsed: Record<string, unknown>;
+              try {
+                parsed = JSON.parse(eventData);
+              } catch {
+                logger.warn('Failed to parse SSE data:', eventData);
+                boundary = buffer.indexOf('\n\n');
+                continue;
+              }
+
+              if (eventType === 'status') {
+                // Status updates replace each other in the stream bubble
+                const statusMsg = (parsed.message as string) || 'Processing...';
+                await chatState.streamMessage(`_${statusMsg}_`, 'BOT');
+                streamStarted = true;
+              } else if (eventType === 'token') {
+                // LLM tokens — accumulate and replace stream content
+                const chunk = (parsed.content as string) || '';
+                tokenContent += chunk;
+                const processedSoFar = getProcessedText(tokenContent);
+                await chatState.streamMessage(processedSoFar, 'BOT');
+              } else if (eventType === 'done') {
+                // Stream complete — finalize with metadata
+                const doneMetadata = (parsed.metadata as Record<string, unknown>) || {};
+                previews = parsePreviews(parsed.previews);
+                lastRatingTarget = (doneMetadata.rating_target as string) || null;
+                lastIsFinalResponse = doneMetadata.is_final_response === true;
+
+                if (tokenContent) {
+                  // Tokens were streamed — content is already displayed.
+                  // Just finalize the stream.
+                  await chatState.endStreamMessage('BOT');
+                } else {
+                  // No tokens (RAG-direct, domain agent) — display the
+                  // full response from the done event.
+                  const finalText = (parsed.response as string) || '';
+                  if (finalText) {
+                    const processedText = getProcessedText(finalText);
+                    await chatState.streamMessage(processedText, 'BOT');
+                    streamStarted = true;
+                  }
+                  if (streamStarted) {
+                    await chatState.endStreamMessage('BOT');
+                  }
+                }
+              } else if (eventType === 'requires_auth' && agent) {
+                // Sent just before done; explained once the reply is shown.
+                refusal = (parsed.reason as string) || null;
+              } else if (eventType === 'error') {
+                const errorMsg = (parsed.message as string) || 'An error occurred';
+                logger.error('SSE error event:', errorMsg);
+                if (streamStarted) {
+                  await chatState.streamMessage(errorMsg, 'BOT');
+                  await chatState.endStreamMessage('BOT');
+                } else {
+                  await chatState.injectMessage(errorMsg);
+                }
+              }
+
+              boundary = buffer.indexOf('\n\n');
+            }
+          }
+
+          // If stream ended without a done event, finalize anyway
+          if (streamStarted && !abandoned()) {
+            // endStreamMessage is idempotent if already called
+            await chatState.endStreamMessage('BOT');
+          }
+        } catch (streamError) {
+          logger.error('Error reading SSE stream:', streamError);
+          if (streamStarted) {
+            await chatState.streamMessage("I had trouble completing the response. Please try again.", 'BOT');
+            await chatState.endStreamMessage('BOT');
+          } else {
+            throw streamError;
+          }
+        }
+
+        if (abandoned()) {
+          reader.cancel().catch(() => {});
+          return;
+        }
+
+        if (refusal) {
+          await chatState.injectMessage(refusalMessage(refusal));
+        }
+        if (previews.length > 0) {
+          await chatState.injectMessage(previewCard(previews));
+        }
+
+        const responseTimeMs = Date.now() - requestStartTime;
+        trackEvent?.({
+          type: 'chatbot_answer_received',
+          queryId,
+          responseTimeMs,
+          success: true,
+          responseLength: tokenContent.length,
+        });
+
+        return;
+      }
+
+      // ── JSON path (discovery, Turnstile, fallback) ─────────────
+      const responseTimeMs = Date.now() - requestStartTime;
+      const body = await response.json();
+
+      // Turnstile challenge — store state and let path redirect to the challenge step
+      if (body.requires_turnstile) {
+        trackEvent?.({ type: 'chatbot_turnstile_shown', queryId });
+        turnstileState.siteKey = body.site_key;
+        turnstileState.challenge += 1;
+        turnstileState.pendingQuery = { query: userInput, sessionId: currentSessionId, queryId, confirmIds };
+        turnstileState.needsChallenge = true;
+        // Signing in makes the challenge moot: the question goes with
+        // the token instead.
+        watchForSignIn();
+        return "One moment — verifying your session…";
+      }
+
+      // Token was accepted (not a Turnstile challenge) — reset for next request.
+      resetTurnstileToken?.();
+
+      // Support different response formats
+      const text = body.response || body.answer || body.text || body.message;
+
+      if (!text) {
+        throw new Error('Invalid response format from API');
+      }
+
+      // Capture response metadata for rating routing
+      const metadata = body.metadata || {};
+      lastRatingTarget = metadata.rating_target || null;
+      lastIsFinalResponse = metadata.is_final_response === true;
+
+      // Process text (handles markdown, links, etc.)
+      const processedText = getProcessedText(text);
+
+      // Build metadata text (only shown when QA_BOT_DEBUG is enabled)
+      const metadataText = isDebugEnabled() ? buildMetadataText(body) : '';
+      const fullContent = metadataText ? `${processedText}\n\n${metadataText}` : processedText;
+
+      // Inject the response
+      await chatState.injectMessage(fullContent);
+
+      // Track response received
+      trackEvent?.({
+        type: 'chatbot_answer_received',
+        queryId,
+        responseTimeMs,
+        success: true,
+        responseLength: text.length,
+        hasMetadata: !!metadataText
+      });
+
+      return;
+    } catch (error) {
+      if (error instanceof AgentTokenError) {
+        // The mint failed for a user who needs a token; nothing was sent.
+        return error.message;
+      }
+      logger.error('Error in Q&A flow:', error);
+
+      // Track error event
+      trackEvent?.({
+        type: 'chatbot_answer_error',
+        queryId: feedbackQueryId ?? undefined,
+        errorType: error instanceof Error ? error.message : 'unknown'
+      });
+
+      return "I apologize, but I'm having trouble processing your question. Please try again later.";
+    }
+  };
+
+  // The challenge the flow's step shows after each message. A card's send
+  // doesn't run the step, so it shows a fresh one itself.
+  const turnstileWidget = () => (
+    <TurnstileWidgetWrapper
+      getState={() => turnstileState}
+      onResubmit={handleTurnstileResubmit}
+      subscribe={agent ? subscribeTurnstile : undefined}
+      trackEvent={trackEvent}
+      loginUrl={loginUrl}
+    />
+  );
+
+  // A preview card's Confirm or Cancel, sent as the user's next turn.
+  const sendFromCard = async (text: string, confirmIds: string[]) => {
+    const chat = lastChat;
+    if (!chat || isResetting()) return;
+    await chat.injectMessage(text, 'USER');
+    const challenge = turnstileState.challenge;
+    const reply = await ask(chat, text, confirmIds.length > 0 ? confirmIds : undefined);
+    if (reply) await chat.injectMessage(reply);
+    if (turnstileState.needsChallenge && turnstileState.challenge !== challenge) {
+      await chat.injectMessage(turnstileWidget());
+    }
+  };
+
+  // Not saved to history: its buttons can't be restored.
+  const previewCard = (previews: Preview[]) => {
+    const cardTurn = turn;
+    return (
+      <div data-transient data-preview-card className="rcb-bot-message-container qa-bot-preview-card-container">
+        <PreviewCard
+          previews={previews}
+          onSend={sendFromCard}
+          isStale={() => turn !== cardTurn}
+          subscribe={subscribeTurn}
+        />
+      </div>
+    );
+  };
+
   // Require endpoint to be configured
   if (!endpoint) {
     throw new Error('Q&A endpoint is required');
@@ -596,6 +1009,11 @@ export const createQAFlow = ({
       message: async (chatState) => {
         // Capture injectMessage so the Turnstile auto-resubmit callback can use it
         injectMessage = chatState.injectMessage.bind(chatState);
+        lastChat = {
+          injectMessage: chatState.injectMessage.bind(chatState),
+          streamMessage: chatState.streamMessage.bind(chatState),
+          endStreamMessage: chatState.endStreamMessage.bind(chatState),
+        };
 
         const { userInput } = chatState;
         if (isResetting && isResetting()) {
@@ -665,324 +1083,7 @@ export const createQAFlow = ({
           return "Thanks for the feedback!";
         }
 
-        // Process as a question
-        // A reset during this send means its conversation is gone; stop
-        // writing into the new one.
-        const generation = agent?.resetGeneration();
-        const abandoned = () => agent !== undefined && agent.resetGeneration() !== generation;
-        try {
-          if (agent) {
-            if (!agent.hostEnabled()) {
-              return 'To ask questions, please log in first.';
-            }
-            // Wait for the first mint, so a send never goes out before the
-            // bot knows whether the user is signed in.
-            const status = await agent.ensureStatus();
-            if (!allowAnonAccess && status === 'signed_out') {
-              trackEvent?.({ type: 'chatbot_login_prompt_shown' });
-              await chatState.injectMessage(transient('To ask questions, please sign in first.', true));
-              return;
-            }
-            if (!allowAnonAccess && status !== 'signed_in') {
-              return new AgentTokenError(agent.source.lastFailure() ?? 'temporary').message;
-            }
-            if (status === 'signed_in' && !(await agent.source.getToken())) {
-              // Signed out elsewhere: the agent would refuse this thread to
-              // an anonymous caller, so start over instead of sending.
-              agent.requestReset('signed_out');
-              return;
-            }
-          }
-
-          const queryId = uuidv4();
-          feedbackQueryId = queryId;
-
-          // Track question asked
-          trackEvent?.({
-            type: 'chatbot_question_sent',
-            queryId,
-            questionLength: userInput.length
-          });
-
-          const headers = {
-            'Content-Type': 'application/json'
-          };
-
-          // Add optional headers
-          if (apiKey) {
-            headers['X-API-KEY'] = apiKey;
-          }
-          const currentSessionId = getSessionId();
-          if (currentSessionId) {
-            headers['X-Session-ID'] = currentSessionId;
-            headers['X-Query-ID'] = queryId;
-          }
-          headers['X-Origin'] = resourceContext || 'access';
-          // Build request body — include silent Turnstile token when available
-          const requestBody: Record<string, string> = {
-            query: userInput,
-            question_id: queryId
-          };
-          if (currentSessionId) {
-            requestBody.session_id = currentSessionId;
-          }
-          if (backendId) {
-            requestBody._backend = backendId;
-          }
-          if (resourceContext) {
-            // rp_name is the legacy field name used by qa-bot-proxy.
-            // resource_context is the canonical field name on the agent's
-            // /api/v1/query endpoint. Send both during the transition so the
-            // same client works against either backend without negotiation.
-            requestBody.rp_name = resourceContext;
-            requestBody.resource_context = resourceContext;
-          }
-          const silentToken = getTurnstileToken?.();
-          if (silentToken) {
-            requestBody.turnstile_token = silentToken;
-          }
-
-          // Log the session ID being sent
-          logger.session('SENT to API', {
-            session_id: currentSessionId,
-            question_id: queryId
-          });
-
-          // Capture timestamp before fetch for response time calculation
-          const requestStartTime = Date.now();
-
-          if (abandoned()) {
-            // A reset (say, a sign-out seen while minting) already started a
-            // new conversation; this question belonged to the old one.
-            return;
-          }
-
-          const response = await request(endpoint, {
-            method: 'POST',
-            headers,
-            credentials: 'include',
-            body: JSON.stringify(requestBody)
-          });
-
-          const statusReply = await agentStatusReply(endpoint, response);
-          if (statusReply !== null) {
-            return statusReply;
-          }
-
-          if (!response.ok) {
-            throw new Error(`API returned ${response.status}`);
-          }
-
-          const contentType = response.headers.get('content-type') || '';
-
-          // ── SSE streaming path (agent queries) ──────────────────────
-          if (contentType.includes('text/event-stream')) {
-            // Token was accepted — reset widget for a fresh token on the next request.
-            resetTurnstileToken?.();
-            const reader = response.body?.getReader();
-            if (!reader) throw new Error('Response body is not readable');
-
-            const decoder = new TextDecoder();
-            let buffer = '';
-            let tokenContent = '';  // Accumulated LLM tokens
-            let streamStarted = false;
-            let refusal: string | null = null;
-
-            try {
-              while (!abandoned()) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                buffer += decoder.decode(value, { stream: true });
-
-                // Parse SSE events from buffer (events are separated by double newlines)
-                let boundary = buffer.indexOf('\n\n');
-                while (boundary !== -1 && !abandoned()) {
-                  const eventBlock = buffer.slice(0, boundary);
-                  buffer = buffer.slice(boundary + 2);
-
-                  // Parse event type and data from the block
-                  let eventType = '';
-                  let eventData = '';
-                  for (const line of eventBlock.split('\n')) {
-                    if (line.startsWith('event: ')) {
-                      eventType = line.slice(7);
-                    } else if (line.startsWith('data: ')) {
-                      eventData = line.slice(6);
-                    }
-                  }
-
-                  if (!eventType || !eventData) {
-                    boundary = buffer.indexOf('\n\n');
-                    continue;
-                  }
-
-                  let parsed: Record<string, unknown>;
-                  try {
-                    parsed = JSON.parse(eventData);
-                  } catch {
-                    logger.warn('Failed to parse SSE data:', eventData);
-                    boundary = buffer.indexOf('\n\n');
-                    continue;
-                  }
-
-                  if (eventType === 'status') {
-                    // Status updates replace each other in the stream bubble
-                    const statusMsg = (parsed.message as string) || 'Processing...';
-                    await chatState.streamMessage(`_${statusMsg}_`, 'BOT');
-                    streamStarted = true;
-                  } else if (eventType === 'token') {
-                    // LLM tokens — accumulate and replace stream content
-                    const chunk = (parsed.content as string) || '';
-                    tokenContent += chunk;
-                    const processedSoFar = getProcessedText(tokenContent);
-                    await chatState.streamMessage(processedSoFar, 'BOT');
-                  } else if (eventType === 'done') {
-                    // Stream complete — finalize with metadata
-                    const doneMetadata = (parsed.metadata as Record<string, unknown>) || {};
-                    lastRatingTarget = (doneMetadata.rating_target as string) || null;
-                    lastIsFinalResponse = doneMetadata.is_final_response === true;
-
-                    if (tokenContent) {
-                      // Tokens were streamed — content is already displayed.
-                      // Just finalize the stream.
-                      await chatState.endStreamMessage('BOT');
-                    } else {
-                      // No tokens (RAG-direct, domain agent) — display the
-                      // full response from the done event.
-                      const finalText = (parsed.response as string) || '';
-                      if (finalText) {
-                        const processedText = getProcessedText(finalText);
-                        await chatState.streamMessage(processedText, 'BOT');
-                        streamStarted = true;
-                      }
-                      if (streamStarted) {
-                        await chatState.endStreamMessage('BOT');
-                      }
-                    }
-                  } else if (eventType === 'requires_auth' && agent) {
-                    // Sent just before done; explained once the reply is shown.
-                    refusal = (parsed.reason as string) || null;
-                  } else if (eventType === 'error') {
-                    const errorMsg = (parsed.message as string) || 'An error occurred';
-                    logger.error('SSE error event:', errorMsg);
-                    if (streamStarted) {
-                      await chatState.streamMessage(errorMsg, 'BOT');
-                      await chatState.endStreamMessage('BOT');
-                    } else {
-                      await chatState.injectMessage(errorMsg);
-                    }
-                  }
-
-                  boundary = buffer.indexOf('\n\n');
-                }
-              }
-
-              // If stream ended without a done event, finalize anyway
-              if (streamStarted && !abandoned()) {
-                // endStreamMessage is idempotent if already called
-                await chatState.endStreamMessage('BOT');
-              }
-            } catch (streamError) {
-              logger.error('Error reading SSE stream:', streamError);
-              if (streamStarted) {
-                await chatState.streamMessage("I had trouble completing the response. Please try again.", 'BOT');
-                await chatState.endStreamMessage('BOT');
-              } else {
-                throw streamError;
-              }
-            }
-
-            if (abandoned()) {
-              reader.cancel().catch(() => {});
-              return;
-            }
-
-            if (refusal) {
-              await chatState.injectMessage(refusalMessage(refusal));
-            }
-
-            const responseTimeMs = Date.now() - requestStartTime;
-            trackEvent?.({
-              type: 'chatbot_answer_received',
-              queryId,
-              responseTimeMs,
-              success: true,
-              responseLength: tokenContent.length,
-            });
-
-            return;
-          }
-
-          // ── JSON path (discovery, Turnstile, fallback) ─────────────
-          const responseTimeMs = Date.now() - requestStartTime;
-          const body = await response.json();
-
-          // Turnstile challenge — store state and let path redirect to the challenge step
-          if (body.requires_turnstile) {
-            trackEvent?.({ type: 'chatbot_turnstile_shown', queryId });
-            turnstileState.siteKey = body.site_key;
-            turnstileState.challenge += 1;
-            turnstileState.pendingQuery = { query: userInput, sessionId: currentSessionId, queryId };
-            turnstileState.needsChallenge = true;
-            // Signing in makes the challenge moot: the question goes with
-            // the token instead.
-            watchForSignIn();
-            return "One moment — verifying your session…";
-          }
-
-          // Token was accepted (not a Turnstile challenge) — reset for next request.
-          resetTurnstileToken?.();
-
-          // Support different response formats
-          const text = body.response || body.answer || body.text || body.message;
-
-          if (!text) {
-            throw new Error('Invalid response format from API');
-          }
-
-          // Capture response metadata for rating routing
-          const metadata = body.metadata || {};
-          lastRatingTarget = metadata.rating_target || null;
-          lastIsFinalResponse = metadata.is_final_response === true;
-
-          // Process text (handles markdown, links, etc.)
-          const processedText = getProcessedText(text);
-
-          // Build metadata text (only shown when QA_BOT_DEBUG is enabled)
-          const metadataText = isDebugEnabled() ? buildMetadataText(body) : '';
-          const fullContent = metadataText ? `${processedText}\n\n${metadataText}` : processedText;
-
-          // Inject the response
-          await chatState.injectMessage(fullContent);
-
-          // Track response received
-          trackEvent?.({
-            type: 'chatbot_answer_received',
-            queryId,
-            responseTimeMs,
-            success: true,
-            responseLength: text.length,
-            hasMetadata: !!metadataText
-          });
-
-          return;
-        } catch (error) {
-          if (error instanceof AgentTokenError) {
-            // The mint failed for a user who needs a token; nothing was sent.
-            return error.message;
-          }
-          logger.error('Error in Q&A flow:', error);
-
-          // Track error event
-          trackEvent?.({
-            type: 'chatbot_answer_error',
-            queryId: feedbackQueryId ?? undefined,
-            errorType: error instanceof Error ? error.message : 'unknown'
-          });
-
-          return "I apologize, but I'm having trouble processing your question. Please try again later.";
-        }
+        return ask(chatState, userInput);
       },
 
       // Show rating options only after final responses that have a valid rating target.
@@ -1021,15 +1122,7 @@ export const createQAFlow = ({
 
       renderMarkdown: ["BOT"],
       chatDisabled: false,
-      component: (
-        <TurnstileWidgetWrapper
-          getState={() => turnstileState}
-          onResubmit={handleTurnstileResubmit}
-          subscribe={agent ? subscribeTurnstile : undefined}
-          trackEvent={trackEvent}
-          loginUrl={loginUrl}
-        />
-      ),
+      component: turnstileWidget(),
       path: "qa_loop"
     }
   };

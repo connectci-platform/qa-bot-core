@@ -1,4 +1,5 @@
 import React from 'react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { createQAFlow } from './qa-flow';
 import { AgentTokenError } from '../agent-token';
 import type { AgentTokenSource, AuthStatus } from '../agent-token';
@@ -678,5 +679,193 @@ describe('agent mode Turnstile', () => {
 
     expect(flow.qa_loop.component.props.getState().siteKey).toBe('site2');
     expect(flow.qa_loop.component.props.getState().pendingQuery).not.toBeNull();
+  });
+});
+
+// ── Previews ───────────────────────────────────────────────────────────
+
+describe('preview card', () => {
+  const ID_A = 'a'.repeat(32);
+  const ID_B = 'b'.repeat(32);
+  const previewEvent = (previews: unknown[]) => ({
+    event: 'done',
+    data: { metadata: { rating_target: 'agent', is_final_response: true }, previews },
+  });
+  const withPreviews = (previews: unknown[]) =>
+    sseResponse([{ event: 'token', data: { content: 'Here is what I would do.' } }, previewEvent(previews)]);
+  const registration = (id = ID_A) => ({
+    preview_id: id,
+    tool: 'register_for_event',
+    data: { event_title: 'GPU Workshop' },
+    no_changes: false,
+  });
+
+  const isCard = (node: unknown) =>
+    !!node && typeof node === 'object' && (node as { props?: Record<string, unknown> }).props?.['data-preview-card'] === true;
+  const cardIn = (state: ReturnType<typeof chatState>) =>
+    state.injectMessage.mock.calls.map(([message]) => message).find(isCard) as React.ReactElement | undefined;
+
+  async function cardTurn(flow: unknown, previews: unknown[] = [registration()]) {
+    const state = chatState('Register me for the GPU workshop');
+    fetchMock.mockResolvedValueOnce(withPreviews(previews));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (flow as any).qa_loop.message(state);
+    return state;
+  }
+
+  const click = async (name: string) => {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name }));
+    });
+  };
+
+  it('shows the card after the streamed answer when the turn has previews', async () => {
+    const state = await cardTurn(makeFlow());
+
+    const card = cardIn(state);
+    expect(card).toBeDefined();
+    expect(isTransient(card)).toBe(true);
+    expect(state.endStreamMessage.mock.invocationCallOrder[0]).toBeLessThan(
+      state.injectMessage.mock.invocationCallOrder[0],
+    );
+    render(card!);
+    expect(screen.getByText('Register for this event')).toBeInTheDocument();
+    expect(screen.getByText('GPU Workshop')).toBeInTheDocument();
+  });
+
+  it('shows no card when the turn has no previews', async () => {
+    const state = chatState('What is ACCESS?');
+    fetchMock.mockResolvedValueOnce(agentAnswer());
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (makeFlow() as any).qa_loop.message(state);
+
+    expect(cardIn(state)).toBeUndefined();
+  });
+
+  it('sends Confirm with the preview ids through the same request as a typed question', async () => {
+    const flow = makeFlow();
+    const state = await cardTurn(flow, [registration(ID_A), registration(ID_B)]);
+    render(cardIn(state)!);
+    fetchMock.mockResolvedValueOnce(agentAnswer('You are registered.'));
+
+    await click('Confirm all');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe(QUERY);
+    expect(init.headers).toEqual({
+      'Content-Type': 'application/json',
+      'X-API-KEY': 'key',
+      'X-Session-ID': 'session-1',
+      'X-Query-ID': expect.any(String),
+      'X-Origin': 'access',
+    });
+    expect(JSON.parse(init.body)).toEqual({
+      query: 'Confirm',
+      confirm_ids: [ID_A, ID_B],
+      question_id: init.headers['X-Query-ID'],
+      session_id: 'session-1',
+    });
+    expect(state.injectMessage).toHaveBeenCalledWith('Confirm', 'USER');
+    expect(state.streamMessage).toHaveBeenLastCalledWith('You are registered.', 'BOT');
+  });
+
+  it('sends Cancel with no ids', async () => {
+    const flow = makeFlow();
+    const state = await cardTurn(flow);
+    render(cardIn(state)!);
+    fetchMock.mockResolvedValueOnce(agentAnswer('Okay, nothing changed.'));
+
+    await click('Cancel');
+
+    const body = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(body.query).toBe('Cancel');
+    expect(body).not.toHaveProperty('confirm_ids');
+    expect(state.injectMessage).toHaveBeenCalledWith('Cancel', 'USER');
+  });
+
+  it('sends once on a double click', async () => {
+    const flow = makeFlow();
+    const state = await cardTurn(flow);
+    render(cardIn(state)!);
+    fetchMock.mockResolvedValue(agentAnswer('Done.'));
+
+    await act(async () => {
+      const confirm = screen.getByRole('button', { name: 'Confirm' });
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows no Confirm for a preview with no changes', async () => {
+    const state = await cardTurn(makeFlow(), [{ ...registration(), no_changes: true }]);
+    render(cardIn(state)!);
+
+    expect(screen.getByText('Register for this event: nothing would change.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Confirm/ })).not.toBeInTheDocument();
+  });
+
+  it('disables an earlier card once a newer question is sent', async () => {
+    const flow = makeFlow();
+    const state = await cardTurn(flow);
+    render(cardIn(state)!);
+    fetchMock.mockResolvedValueOnce(agentAnswer());
+
+    await act(async () => {
+      await send(flow, 'Actually, never mind');
+    });
+
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  });
+
+  it('carries the Bearer token on a confirm in agent mode', async () => {
+    const { agent } = fakeAgent();
+    const flow = makeFlow({ agent });
+    const state = await cardTurn(flow);
+    render(cardIn(state)!);
+    fetchMock.mockResolvedValueOnce(agentAnswer('Done.'));
+
+    await click('Confirm');
+
+    const [, init] = fetchMock.mock.calls[1];
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer t1');
+    expect(JSON.parse(init.body).confirm_ids).toEqual([ID_A]);
+  });
+
+  it('shows the card after a Turnstile resubmit too', async () => {
+    const flow = makeFlow();
+    const state = chatState('Register me for the GPU workshop');
+    fetchMock.mockResolvedValueOnce(jsonResponse({ requires_turnstile: true, site_key: 'site' }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (flow as any).qa_loop.message(state);
+    fetchMock.mockResolvedValueOnce(withPreviews([registration()]));
+
+    await flow.qa_loop.component.props.onResubmit('turnstile-token');
+
+    const card = cardIn(state);
+    expect(card).toBeDefined();
+    render(card!);
+    expect(screen.getByText('Register for this event')).toBeInTheDocument();
+  });
+
+  it('keeps the confirm ids when a confirm is challenged and resubmitted', async () => {
+    const flow = makeFlow();
+    const state = await cardTurn(flow);
+    render(cardIn(state)!);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ requires_turnstile: true, site_key: 'site' }));
+    await click('Confirm');
+    fetchMock.mockResolvedValueOnce(agentAnswer('Done.'));
+
+    await flow.qa_loop.component.props.onResubmit('turnstile-token');
+
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toMatchObject({
+      query: 'Confirm',
+      confirm_ids: [ID_A],
+      turnstile_token: 'turnstile-token',
+    });
   });
 });

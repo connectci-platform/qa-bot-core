@@ -1,0 +1,120 @@
+import { MAX_CONFIRM_IDS, parsePreviews, previewDetails, previewTitle } from './preview';
+
+const ID_A = 'a'.repeat(32);
+const ID_B = 'b'.repeat(32);
+
+describe('parsePreviews', () => {
+  it('reads the done event previews', () => {
+    expect(
+      parsePreviews([
+        { preview_id: ID_A, tool: 'register_for_event', data: { event: 'Workshop' }, no_changes: false },
+        { preview_id: ID_B, tool: 'update_event', data: {}, no_changes: true },
+      ]),
+    ).toEqual([
+      { previewId: ID_A, tool: 'register_for_event', data: { event: 'Workshop' }, noChanges: false },
+      { previewId: ID_B, tool: 'update_event', data: {}, noChanges: true },
+    ]);
+  });
+
+  it('is empty when there are no previews', () => {
+    expect(parsePreviews(undefined)).toEqual([]);
+    expect(parsePreviews(null)).toEqual([]);
+    expect(parsePreviews('nope')).toEqual([]);
+  });
+
+  it('drops entries without a valid preview id', () => {
+    expect(
+      parsePreviews([
+        { preview_id: 'not-hex', tool: 'x', data: {} },
+        { preview_id: ID_A.toUpperCase(), tool: 'x', data: {} },
+        null,
+        { preview_id: ID_A, tool: 'x', data: [] },
+      ]),
+    ).toEqual([{ previewId: ID_A, tool: 'x', data: {}, noChanges: false }]);
+  });
+
+  it('treats no_changes inside data as no changes too', () => {
+    expect(parsePreviews([{ preview_id: ID_A, tool: 'x', data: { no_changes: true } }])[0].noChanges).toBe(true);
+  });
+});
+
+describe('previewTitle', () => {
+  it('uses the full-screen client titles', () => {
+    expect(previewTitle('register_for_event')).toBe('Register for this event');
+    expect(previewTitle('create_support_ticket')).toBe('Open this support ticket');
+  });
+
+  it('humanizes an unknown tool', () => {
+    expect(previewTitle('do_some-thing')).toBe('Do some thing');
+    expect(previewTitle('')).toBe('Change');
+  });
+});
+
+describe('previewDetails', () => {
+  it('turns flags into notes and scalars into humanized rows', () => {
+    const long = 'x'.repeat(2000);
+    expect(
+      previewDetails({
+        preview_id: ID_A,
+        status: 'preview',
+        action: 'create',
+        event_title: 'Workshop',
+        description: long,
+        public: true,
+        tags: ['gpu', 'ai'],
+        location: null,
+        registrants_notified_on_commit: true,
+        detail_unavailable: false,
+      }),
+    ).toEqual({
+      notes: ['Registrants will be emailed about this change.'],
+      rows: [
+        { label: 'Event title', value: 'Workshop' },
+        { label: 'Description', value: long },
+        { label: 'Public', value: 'yes' },
+        { label: 'Tags', value: 'gpu, ai' },
+        { label: 'Location', value: 'none' },
+      ],
+    });
+  });
+
+  it('shows field changes as old and new', () => {
+    expect(
+      previewDetails({
+        changes: [
+          { field: 'start_time', old: '9:00', new: '10:00' },
+          { field: 'title', old_unavailable: true, new: 'New' },
+        ],
+      }).rows,
+    ).toEqual([
+      { label: 'Start time', value: '9:00 → 10:00' },
+      { label: 'Title', value: 'unknown → New' },
+    ]);
+  });
+
+  it('flattens a nested object', () => {
+    expect(previewDetails({ event: { start_date: '2026-12-01' } }).rows).toEqual([
+      { label: 'Event start date', value: '2026-12-01' },
+    ]);
+  });
+
+  it('notes every flag', () => {
+    expect(
+      previewDetails({
+        detail_unavailable: true,
+        current_state_unavailable: true,
+        registrants_may_be_notified: true,
+        no_changes: true,
+      }).notes,
+    ).toEqual([
+      "Current details couldn't be loaded.",
+      "The current state couldn't be loaded.",
+      'Registrants may be emailed about this change.',
+      "This doesn't change anything.",
+    ]);
+  });
+});
+
+it('caps a confirm at ten ids', () => {
+  expect(MAX_CONFIRM_IDS).toBe(10);
+});

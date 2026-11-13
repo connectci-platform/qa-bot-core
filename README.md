@@ -271,6 +271,14 @@ How it behaves:
 - **When the agent refuses a tool**, the bot explains after the reply: a
   sign-in prompt, or "Changes aren't available here." when this site can't
   make changes.
+- **Changes wait for Confirm.** When the agent prepares a change (an event
+  registration, a support ticket, an announcement or an event edit), its
+  `done` event lists `previews`, and the bot shows them in one card after the
+  reply. Confirm sends the next turn as "Confirm" with the preview ids in
+  `confirm_ids`; Cancel sends "Cancel" with none. Both go through the same
+  request as a typed question. The card's buttons work once, and stop working
+  when a newer question is sent. A preview with nothing to change is shown as
+  a note with no Confirm, and more than 10 changes can't be confirmed at once.
 - **Signing out starts a new conversation and clears saved history**, which is
   one store for everyone using the browser. A thread the agent no longer lets
   this page continue also starts over. Signing out of the identity site

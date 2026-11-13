@@ -542,6 +542,99 @@
   transform: translateY(0) !important;
 }
 
+/* Preview card: changes the assistant has prepared, waiting for Confirm.
+   Drawn inside its own .rcb-bot-message-container, since react-chatbotify
+   only draws a bubble for string messages. Buttons match .rcb-options. */
+.qa-bot-preview-card {
+  margin: 8px 16px;
+  padding: 12px 14px;
+  border: 1px solid #d0d0d0;
+  border-radius: 8px;
+  background-color: #f7f9fa;
+  color: #222;
+  font-size: 14px;
+  line-height: 1.4;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 85%;
+  box-sizing: border-box;
+}
+
+.qa-bot-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qa-bot-preview-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.qa-bot-preview-note,
+.qa-bot-preview-hint {
+  margin: 0;
+}
+
+.qa-bot-preview-hint {
+  color: #555;
+  font-size: 13px;
+}
+
+.qa-bot-preview-rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qa-bot-preview-rows dt {
+  font-weight: 600;
+}
+
+.qa-bot-preview-rows dd {
+  margin: 0;
+  max-height: 12rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.qa-bot-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.qa-bot-preview-button {
+  border: 1px solid #d0d0d0;
+  background-color: #ffffff;
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--secondaryColor, #107180);
+  transition: all 0.2s ease;
+}
+
+.qa-bot-preview-button.qa-bot-preview-confirm {
+  background-color: var(--secondaryColor, #107180);
+  border-color: var(--secondaryColor, #107180);
+  color: #ffffff;
+}
+
+.qa-bot-preview-button:hover:not(:disabled) {
+  border-color: var(--secondaryColor, #107180);
+  box-shadow: 0 2px 4px rgba(16, 113, 128, 0.2);
+}
+
+.qa-bot-preview-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Keyboard navigation hints */
 .keyboard-nav-hint {
   font-size: 12px !important;

@@ -81,6 +81,7 @@ const FLAG_NOTES: Record<string, string> = {
   current_state_unavailable: "The current state couldn't be loaded.",
   registrants_notified_on_commit: 'Registrants will be emailed about this change.',
   registrants_may_be_notified: 'Registrants may be emailed about this change.',
+  dates_incomplete: "Not all of this series' dates could be loaded.",
   no_changes: "This doesn't change anything.",
 };
 

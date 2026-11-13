@@ -98,6 +98,12 @@ describe('previewDetails', () => {
     ]);
   });
 
+  it('notes an incomplete date range instead of showing it as a row', () => {
+    const { notes, rows } = previewDetails({ title: 'Office Hours', dates_incomplete: true });
+    expect(notes).toEqual(["Not all of this series' dates could be loaded."]);
+    expect(rows).toEqual([{ label: 'Title', value: 'Office Hours' }]);
+  });
+
   it('notes every flag', () => {
     expect(
       previewDetails({

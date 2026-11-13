@@ -1,6 +1,7 @@
 import React from 'react';
 import { MAX_CONFIRM_IDS, previewDetails, previewTitle } from '../utils/preview';
 import type { Preview } from '../utils/preview';
+import { logger } from '../utils/logger';
 
 interface PreviewCardProps {
   previews: Preview[];
@@ -11,6 +12,21 @@ interface PreviewCardProps {
   /** Re-render when isStale may have changed. */
   subscribe?: (listener: () => void) => () => void;
 }
+
+/** A row's value. Long text scrolls, and only then takes keyboard focus. */
+const RowValue: React.FC<{ value: string }> = ({ value }) => {
+  const ref = React.useRef<HTMLElement>(null);
+  const [scrolls, setScrolls] = React.useState(false);
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (el) setScrolls(el.scrollHeight > el.clientHeight);
+  }, [value]);
+  return (
+    <dd ref={ref} tabIndex={scrolls ? 0 : undefined}>
+      {value}
+    </dd>
+  );
+};
 
 /** What the agent has prepared for one turn, with one Confirm for all of it. */
 const PreviewCard: React.FC<PreviewCardProps> = ({ previews, onSend, isStale, subscribe }) => {
@@ -29,7 +45,12 @@ const PreviewCard: React.FC<PreviewCardProps> = ({ previews, onSend, isStale, su
     if (used.current || isStale?.()) return;
     used.current = true;
     rerender();
-    onSend(text, confirmIds);
+    const failed = (error: unknown) => logger.error('Error sending from the preview card:', error);
+    try {
+      Promise.resolve(onSend(text, confirmIds)).catch(failed);
+    } catch (error) {
+      failed(error);
+    }
   };
 
   return (
@@ -57,9 +78,7 @@ const PreviewCard: React.FC<PreviewCardProps> = ({ previews, onSend, isStale, su
                 {rows.map((row, i) => (
                   <div key={`${row.label}-${i}`}>
                     <dt>{row.label}</dt>
-                    <dd tabIndex={0} aria-label={`${row.label} value`}>
-                      {row.value}
-                    </dd>
+                    <RowValue value={row.value} />
                   </div>
                 ))}
               </dl>

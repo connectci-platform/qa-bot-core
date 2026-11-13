@@ -50,6 +50,15 @@ describe('PreviewCard', () => {
     expect(screen.getByText('Nothing changes until you confirm.')).toBeInTheDocument();
   });
 
+  it('reads a row value as itself and leaves short values out of the tab order', () => {
+    renderCard([preview(1, { data: { event_title: 'Workshop' } })]);
+
+    const value = screen.getByText('Workshop');
+    expect(value.tagName).toBe('DD');
+    expect(value).not.toHaveAttribute('aria-label');
+    expect(value).not.toHaveAttribute('tabindex');
+  });
+
   it('confirms one preview with Confirm', () => {
     const { onSend } = renderCard([preview(1)]);
 

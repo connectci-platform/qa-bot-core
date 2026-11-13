@@ -12,6 +12,7 @@ import { viteEnv } from '../vite-env';
 import { agentFetch, isAgentRequest } from '../agent-fetch';
 import { AgentTokenError } from '../agent-token';
 import type { AgentTokenSource, AuthStatus } from '../agent-token';
+import type { Params } from 'react-chatbotify';
 import type { AgentAuthConfig } from '../../config';
 import type { AnalyticsEventInput } from '../../contexts/AnalyticsContext';
 
@@ -293,7 +294,9 @@ export const createQAFlow = ({
   // so the Turnstile onVerify callback can inject responses into the chat.
   let injectMessage: ((msg: string | React.ReactElement) => Promise<unknown>) | null = null;
   // The latest chat params, so a preview card's buttons can send a turn.
-  let lastChat: ChatIO | null = null;
+  let lastChat: Pick<Params, 'injectMessage' | 'goToPath'> | null = null;
+  // The card click being sent, read once by the qa_loop step it starts.
+  let cardSend: { text: string; confirmIds: string[] } | null = null;
 
   // Counts sends. A preview card belongs to one turn, and a newer send
   // leaves its buttons disabled.
@@ -959,28 +962,22 @@ export const createQAFlow = ({
     }
   };
 
-  // The challenge the flow's step shows after each message. A card's send
-  // doesn't run the step, so it shows a fresh one itself.
-  const turnstileWidget = () => (
-    <TurnstileWidgetWrapper
-      getState={() => turnstileState}
-      onResubmit={handleTurnstileResubmit}
-      subscribe={agent ? subscribeTurnstile : undefined}
-      trackEvent={trackEvent}
-      loginUrl={loginUrl}
-    />
-  );
-
-  // A preview card's Confirm or Cancel, sent as the user's next turn.
+  // A preview card's Confirm or Cancel, sent as the user's next turn. The
+  // click is shown as the user's message, which react-chatbotify reads as
+  // the step's userInput, and goToPath runs the qa_loop step as a typed
+  // question would: typing indicator, answer, rating options, Turnstile.
   const sendFromCard = async (text: string, confirmIds: string[]) => {
     const chat = lastChat;
     if (!chat || isResetting()) return;
-    await chat.injectMessage(text, 'USER');
-    const challenge = turnstileState.challenge;
-    const reply = await ask(chat, text, confirmIds.length > 0 ? confirmIds : undefined);
-    if (reply) await chat.injectMessage(reply);
-    if (turnstileState.needsChallenge && turnstileState.challenge !== challenge) {
-      await chat.injectMessage(turnstileWidget());
+    cardSend = { text, confirmIds };
+    try {
+      await chat.injectMessage(text, 'USER');
+      await chat.goToPath('qa_loop');
+    } catch (error) {
+      logger.error('Error sending from the preview card:', error);
+    } finally {
+      // The step consumes it; never let it reach a later typed "Confirm".
+      cardSend = null;
     }
   };
 
@@ -1010,9 +1007,8 @@ export const createQAFlow = ({
         // Capture injectMessage so the Turnstile auto-resubmit callback can use it
         injectMessage = chatState.injectMessage.bind(chatState);
         lastChat = {
-          injectMessage: chatState.injectMessage.bind(chatState),
-          streamMessage: chatState.streamMessage.bind(chatState),
-          endStreamMessage: chatState.endStreamMessage.bind(chatState),
+          injectMessage: (...args) => chatState.injectMessage(...args),
+          goToPath: (path) => chatState.goToPath(path),
         };
 
         const { userInput } = chatState;
@@ -1083,7 +1079,11 @@ export const createQAFlow = ({
           return "Thanks for the feedback!";
         }
 
-        return ask(chatState, userInput);
+        // A preview card's click carries its ids; a typed "Confirm" has none.
+        const fromCard = cardSend?.text === userInput ? cardSend : null;
+        cardSend = null;
+        const confirmIds = fromCard && fromCard.confirmIds.length > 0 ? fromCard.confirmIds : undefined;
+        return ask(chatState, userInput, confirmIds);
       },
 
       // Show rating options only after final responses that have a valid rating target.
@@ -1122,7 +1122,15 @@ export const createQAFlow = ({
 
       renderMarkdown: ["BOT"],
       chatDisabled: false,
-      component: turnstileWidget(),
+      component: (
+        <TurnstileWidgetWrapper
+          getState={() => turnstileState}
+          onResubmit={handleTurnstileResubmit}
+          subscribe={agent ? subscribeTurnstile : undefined}
+          trackEvent={trackEvent}
+          loginUrl={loginUrl}
+        />
+      ),
       path: "qa_loop"
     }
   };

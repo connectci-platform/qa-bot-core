@@ -173,7 +173,7 @@ describe("htmlText doesn't hide where a link goes", () => {
   it('shows what other tags load, decoded', () => {
     expect(htmlText(`<img src=${evil}/t.png>`)).toBe(`[image: ${evil}/t.png]`);
     expect(htmlText(`<iframe src="${evil}"></iframe>`)).toBe(`[iframe: ${evil}]`);
-    expect(htmlText('<a href="java&#115;cript:x">y</a>')).toBe('y (javascript:x)');
+    expect(htmlText('<a href="&#106;avascript:x">y</a>')).toBe('y (javascript:x)');
     expect(htmlText('<p>&amp;lt;b&amp;gt;<!-- <a href="x"> --></p>')).toBe('&lt;b&gt;');
   });
 
